@@ -18,6 +18,10 @@ public:
 
     void handleCommand(int client_fd, const std::string& command);
 
+    CommandSerializer* getSerializer() const {
+        return serializer_ .get();
+    }
+
 private:
     UnixSocketServer& server_;
     NetlinkManager& netlink_mgr_;

@@ -17,35 +17,63 @@
 NetworkManager::NetworkManager(NetlinkManager& netlink_mgr) : netlink_mgr_(netlink_mgr) {}
 
 std::string NetworkManager::setDynamicIP(const std::string& ifname) {
+    std::cout << "DEBUG: setDynamicIP called for interface: " << ifname << std::endl;
+
     if (ifname.empty()) {
+        std::cerr << "ERROR: No interface specified in setDynamicIP" << std::endl;
         return "error(no interface specified)";
     }
 
+    std::string name = "eno1"; // test
+    std::cout << "INFO: Setting DHCP for interface: " << ifname << std::endl;
+    std::cout << "DEBUG: Using interface name: " << name << " for dhcpcd" << std::endl;
+    
+    stopDhcpcd(name);
+
     pid_t pid = fork();
     if (pid == -1) {
+        std::cerr << "ERROR: fork() failed in setDynamicIP: " << strerror(errno) << std::endl;
         return "error(fork failed)";
     } else if (pid == 0) {
-        execlp("dhcpcd", "dhcpcd", "-n", ifname.c_str(), nullptr);
+        std::cout << "DEBUG: Child process executing: dhcpcd -n " << name << std::endl;
+        execlp("dhcpcd", "dhcpcd", "-n", name.c_str(), nullptr);
+        std::cerr << "ERROR: execlp failed: " << strerror(errno) << std::endl;
         _exit(EXIT_FAILURE);
     }
 
+    std::cout << "DEBUG: Waiting for dhcpcd process to complete, PID: " << pid << std::endl;
     int status;
     waitpid(pid, &status, 0);
+    
     if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        std::cout << "INFO: dhcpcd completed successfully for interface: " << ifname << std::endl;
         return getInterfaceInfo(ifname);
     } else {
+        std::cerr << "ERROR: dhcpcd failed for interface: " << ifname 
+                  << ", exit status: " << WEXITSTATUS(status) << std::endl;
         return "error(dhcpcd failed)";
     }
 }
 
 void NetworkManager::stopDhcpcd(const std::string& ifname) {
+    std::cout << "DEBUG: stopDhcpcd called for interface: " << ifname << std::endl;
+    
     if (!ifname.empty()) {
+        std::cout << "INFO: Stopping dhcpcd for interface: " << ifname << std::endl;
+        
         pid_t pid = fork();
         if (pid == 0) {
+            std::cout << "DEBUG: Child process executing: dhcpcd -k " << ifname << std::endl;
             execlp("dhcpcd", "dhcpcd", "-k", ifname.c_str(), nullptr);
+            std::cerr << "ERROR: execlp failed in stopDhcpcd: " << strerror(errno) << std::endl;
             _exit(EXIT_FAILURE);
         }
+        
+        std::cout << "DEBUG: Waiting for dhcpcd stop process, PID: " << pid << std::endl;
         waitpid(pid, nullptr, 0);
+        std::cout << "INFO: dhcpcd stopped for interface: " << ifname << std::endl;
+    } else {
+        std::cout << "WARNING: stopDhcpcd called with empty interface name" << std::endl;
     }
 }
 
@@ -174,4 +202,76 @@ std::string NetworkManager::getInterfaceInfo(const std::string& ifname) {
     std::stringstream ss;
     ss << ifname << ":" << ip_str << ":" << mask_str << ":" << flag_str << ":" << gateway_str;
     return ss.str();
+}
+
+bool NetworkManager::bringInterfaceUp(const std::string& ifname) {
+    struct nl_sock* sock = netlink_mgr_.getSocket();
+    struct nl_cache* link_cache = netlink_mgr_.getLinkCache();
+    
+    struct rtnl_link* link = rtnl_link_get_by_name(link_cache, ifname.c_str());
+    if (!link) {
+        std::cerr << "Interface " << ifname << " not found" << std::endl;
+        return false;
+    }
+    
+    // Создаем новый объект link для изменения
+    struct rtnl_link* new_link = rtnl_link_alloc();
+    if (!new_link) {
+        std::cerr << "Failed to allocate link object" << std::endl;
+        rtnl_link_put(link);
+        return false;
+    }
+    
+    // Устанавливаем флаг UP
+    rtnl_link_set_flags(new_link, IFF_UP);
+    
+    int err = rtnl_link_change(sock, link, new_link, 0);
+    if (err < 0) {
+        std::cerr << "Failed to bring interface " << ifname << " up: " << nl_geterror(err) << std::endl;
+        rtnl_link_put(link);
+        rtnl_link_put(new_link);
+        return false;
+    }
+    
+    std::cout << "Interface " << ifname << " brought up successfully" << std::endl;
+    
+    rtnl_link_put(link);
+    rtnl_link_put(new_link);
+    return true;
+}
+
+bool NetworkManager::bringInterfaceDown(const std::string& ifname) {
+    struct nl_sock* sock = netlink_mgr_.getSocket();
+    struct nl_cache* link_cache = netlink_mgr_.getLinkCache();
+    
+    struct rtnl_link* link = rtnl_link_get_by_name(link_cache, ifname.c_str());
+    if (!link) {
+        std::cerr << "Interface " << ifname << " not found" << std::endl;
+        return false;
+    }
+    
+    // Создаем новый объект link для изменения
+    struct rtnl_link* new_link = rtnl_link_alloc();
+    if (!new_link) {
+        std::cerr << "Failed to allocate link object" << std::endl;
+        rtnl_link_put(link);
+        return false;
+    }
+    
+    // Снимаем флаг UP
+    rtnl_link_unset_flags(new_link, IFF_UP);
+    
+    int err = rtnl_link_change(sock, link, new_link, 0);
+    if (err < 0) {
+        std::cerr << "Failed to bring interface " << ifname << " down: " << nl_geterror(err) << std::endl;
+        rtnl_link_put(link);
+        rtnl_link_put(new_link);
+        return false;
+    }
+    
+    std::cout << "Interface " << ifname << " brought down successfully" << std::endl;
+    
+    rtnl_link_put(link);
+    rtnl_link_put(new_link);
+    return true;
 }

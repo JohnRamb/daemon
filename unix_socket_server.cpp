@@ -87,7 +87,7 @@ void UnixSocketServer::handleServerEvent(int fd, uint32_t events) {
 }
 
 void UnixSocketServer::handleClientEvent(int client_fd, uint32_t events) {
-    char buffer[1024];
+    char buffer[4096];
     ssize_t len = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
     if (len <= 0) {
         if (len == 0) {

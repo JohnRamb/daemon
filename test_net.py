@@ -11,7 +11,7 @@ try:
     s.connect("/tmp/network_daemon.sock")
     
     # Отправить команду set_dynamic
-    cmd = "set_dynamic eth0"
+    cmd = "( dhcpOn ( eth0 ) )"
     print(f"Отправка команды: {cmd}")
     s.send(cmd.encode())
     
@@ -19,7 +19,7 @@ try:
     max_attempts = 3
     attempt = 0
     while attempt < max_attempts:
-        time.sleep(30)  # Задержка 10 секунд для ожидания ответа от dhcpcd
+        time.sleep(10)  # Задержка 10 секунд для ожидания ответа от dhcpcd
         try:
             response = s.recv(2048).decode()
             print(f"Ответ от демона: {response}")

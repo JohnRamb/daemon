@@ -44,12 +44,15 @@ void CommandProcessor::handleCommand(int client_fd, const std::string& command) 
         response = handleEnumerate();
     } else if (cmd == "on" && tokens.size() == 2) {
         response = handleOn(tokens[1]);
+        return;
     } else if (cmd == "off" && tokens.size() == 2) {
         response = handleOff(tokens[1]);
     } else if (cmd == "dhcpOn" && tokens.size() == 2) {
         response = handleDhcpOn(tokens[1]);
+        return;
     } else if (cmd == "dhcpOff" && tokens.size() == 2) {
         response = handleDhcpOff(tokens[1]);
+        return;
     } else if (cmd == "setStatic" && tokens.size() == 5) {
         response = handleSetStatic(tokens[1], tokens[2], tokens[3], tokens[4]);
     } else {
@@ -69,29 +72,63 @@ std::string CommandProcessor::handleEnumerate() {
 
     std::stringstream ss;
     struct nl_object* obj = nl_cache_get_first(link_cache);
-    bool first = true;
+    bool first_interface = true;
+    
+    ss << "enumerate(";
+    
     while (obj) {
         struct rtnl_link* link = (struct rtnl_link*)obj;
-        char ifname[IF_NAMESIZE] = {0};
-        const char* name = rtnl_link_get_name(link);
-        if (name) {
-            strncpy(ifname, name, sizeof(ifname) - 1);
+        const char* ifname = rtnl_link_get_name(link);
+        
+        if (ifname) {
+            if (!first_interface) {
+                ss << " ";
+            }
+            
+            // Получаем информацию об интерфейсе через существующий метод
+            std::string interface_info = network_mgr_.getInterfaceInfo(ifname);
+            
+            // Парсим информацию (формат: ifname:ip:mask:flag:gateway)
+            std::vector<std::string> parts;
+            std::istringstream iss(interface_info);
+            std::string part;
+            
+            while (std::getline(iss, part, ':')) {
+                parts.push_back(part);
+            }
+            
+            // Получаем MAC-адрес
             struct nl_addr* addr = rtnl_link_get_addr(link);
-            char mac_str[18] = {0};
+            std::string mac_str = "none";
             if (addr) {
                 unsigned char* mac = (unsigned char*)nl_addr_get_binary_addr(addr);
-                snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
+                char mac_buf[18];
+                snprintf(mac_buf, sizeof(mac_buf), "%02x-%02x-%02x-%02x-%02x-%02x",
                          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+                mac_str = mac_buf;
             }
-            if (!first) {
-                ss << ",";
-            }
-            ss << ifname << ":" << (addr ? mac_str : "none");
-            first = false;
+            
+            // Получаем флаги интерфейса
+            unsigned int flags = rtnl_link_get_flags(link);
+            char flags_buf[9];
+            snprintf(flags_buf, sizeof(flags_buf), "%08x", flags);
+            
+            // Формируем информацию об интерфейсе
+            ss << "iface=" << ifname 
+               << " addr=" << (parts.size() >= 2 && parts[1] != "none" ? parts[1] : "none")
+               << " mac=" << mac_str
+               << " gateway=" << (parts.size() >= 5 && parts[4] != "none" ? parts[4] : "none")
+               << " mask=" << (parts.size() >= 3 && parts[2] != "none" ? parts[2] : "none")
+               << " flag=" << flags_buf;
+            
+            first_interface = false;
         }
         obj = nl_cache_get_next(obj);
     }
-    return ss.str().empty() ? "none" : ss.str();
+    
+    ss << ")";
+    
+    return ss.str();
 }
 
 std::string CommandProcessor::handleOn(const std::string& ifname) {

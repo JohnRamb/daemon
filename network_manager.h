@@ -12,6 +12,8 @@ public:
     void stopDhcpcd(const std::string& ifname);
     void setStaticIP(const std::string& ifname, const std::string& ip_mask, const std::string& gateway);
     std::string getInterfaceInfo(const std::string& ifname);
+    bool bringInterfaceUp(const std::string& ifname); 
+    bool bringInterfaceDown(const std::string& ifname);
 
 private:
     NetlinkManager& netlink_mgr_;

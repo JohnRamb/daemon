@@ -20,6 +20,12 @@ public:
     void setClientHandler(ClientHandler handler);
     void sendResponse(int client_fd, const std::string& response);
 
+    void broadcastToAllClients(const std::string& message) {
+        for (const auto& [client_fd, handler] : client_handlers_) {
+            sendResponse(client_fd, message);
+        }
+    }
+
 private:
     EventLoop& loop_;
     std::string socket_path_;
