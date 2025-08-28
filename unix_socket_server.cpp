@@ -1,5 +1,4 @@
 #include "unix_socket_server.h"
-#include "event_loop.h"
 #include <iostream>
 #include <system_error>
 #include <cstring>
@@ -8,18 +7,43 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/socket.h>
+#include <sys/epoll.h>
 
 UnixSocketServer::UnixSocketServer(EventLoop& loop, const std::string& socket_path)
-    : loop_(loop), socket_path_(socket_path) {}
+    : loop_(loop), socket_path_(socket_path) {
+    struct event_base* base = loop_.get_event_base();
+    if (!base) {
+        throw std::runtime_error("EventLoop::get_event_base() returned nullptr");
+    }
+    std::cout << "UnixSocketServer: event_base is valid: " << base << std::endl;
+
+    timer_event_ = evtimer_new(base, timer_callback, this);
+    if (!timer_event_) {
+        throw std::runtime_error("Failed to create timer_event_");
+    }
+    std::cout << "UnixSocketServer: timer_event_ created: " << timer_event_ << std::endl;
+
+    struct timeval tv = {30, 0}; // Проверка каждые 30 секунд
+    if (event_add(timer_event_, &tv) == -1) {
+        event_free(timer_event_);
+        timer_event_ = nullptr;
+        throw std::runtime_error("Failed to add timer event");
+    }
+    std::cout << "UnixSocketServer: Timer added successfully" << std::endl;
+}
 
 UnixSocketServer::~UnixSocketServer() {
     stop();
+    if (timer_event_) {
+        event_free(timer_event_);
+        timer_event_ = nullptr;
+    }
 }
 
 void UnixSocketServer::start() {
     createSocket();
     loop_.add(server_fd_, EPOLLIN, 
-        std::bind(&UnixSocketServer::handleServerEvent, this, std::placeholders::_1, std::placeholders::_2));
+        [this](int fd, uint32_t events) { handleServerEvent(fd, events); });
 }
 
 void UnixSocketServer::stop() {
@@ -35,6 +59,7 @@ void UnixSocketServer::stop() {
         close(fd);
     }
     client_handlers_.clear();
+    client_last_activity_.clear();
 }
 
 void UnixSocketServer::createSocket() {
@@ -63,7 +88,7 @@ void UnixSocketServer::createSocket() {
     std::cout << "Unix сокет создан и прослушивается по пути " << socket_path_ << std::endl;
 }
 
-void UnixSocketServer::handleServerEvent(int fd, uint32_t events) {
+void UnixSocketServer::handleServerEvent(int fd, [[maybe_unused]] uint32_t events) {
     struct sockaddr_un addr;
     socklen_t addrlen = sizeof(addr);
     int client_fd = accept(fd, (struct sockaddr*)&addr, &addrlen);
@@ -81,12 +106,15 @@ void UnixSocketServer::handleServerEvent(int fd, uint32_t events) {
         return;
     }
 
-    auto handler = std::bind(&UnixSocketServer::handleClientEvent, this, std::placeholders::_1, std::placeholders::_2);
+    client_last_activity_[client_fd] = std::chrono::steady_clock::now();
+    auto handler = [this](int client_fd, uint32_t events) {
+        handleClientEvent(client_fd, events);
+    };
     loop_.add(client_fd, EPOLLIN, handler);
     client_handlers_[client_fd] = handler;
 }
 
-void UnixSocketServer::handleClientEvent(int client_fd, uint32_t events) {
+void UnixSocketServer::handleClientEvent(int client_fd, [[maybe_unused]] uint32_t events) {
     char buffer[4096];
     ssize_t len = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
     if (len <= 0) {
@@ -99,6 +127,7 @@ void UnixSocketServer::handleClientEvent(int client_fd, uint32_t events) {
         return;
     }
     
+    client_last_activity_[client_fd] = std::chrono::steady_clock::now();
     buffer[len] = '\0';
     std::string command(buffer);
     
@@ -110,6 +139,7 @@ void UnixSocketServer::handleClientEvent(int client_fd, uint32_t events) {
 void UnixSocketServer::cleanupClient(int client_fd) {
     loop_.remove(client_fd);
     client_handlers_.erase(client_fd);
+    client_last_activity_.erase(client_fd);
     close(client_fd);
 }
 
@@ -121,5 +151,33 @@ void UnixSocketServer::sendResponse(int client_fd, const std::string& response) 
     if (send(client_fd, response.c_str(), response.length(), 0) < 0) {
         std::cerr << "Ошибка отправки ответа клиенту: " << strerror(errno) << std::endl;
         cleanupClient(client_fd);
+    }
+}
+
+void UnixSocketServer::broadcastToAllClients(const std::string& message) {
+    for (const auto& [fd, _] : client_handlers_) {
+        sendResponse(fd, message);
+    }
+}
+
+void UnixSocketServer::checkTimeouts() {
+    auto now = std::chrono::steady_clock::now();
+    for (auto it = client_last_activity_.begin(); it != client_last_activity_.end();) {
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - it->second).count() > 30) {
+            std::cout << "Таймаут для клиента fd=" << it->first << std::endl;
+            cleanupClient(it->first);
+            it = client_last_activity_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void UnixSocketServer::timer_callback([[maybe_unused]] evutil_socket_t fd, [[maybe_unused]] short events, void* arg) {
+    UnixSocketServer* server = static_cast<UnixSocketServer*>(arg);
+    server->checkTimeouts();
+    struct timeval tv = {30, 0}; // Перезапускаем таймер
+    if (event_add(server->timer_event_, &tv) == -1) {
+        std::cerr << "Failed to re-add timer event" << std::endl;
     }
 }

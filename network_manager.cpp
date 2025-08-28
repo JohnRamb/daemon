@@ -17,41 +17,50 @@
 NetworkManager::NetworkManager(NetlinkManager& netlink_mgr) : netlink_mgr_(netlink_mgr) {}
 
 std::string NetworkManager::setDynamicIP(const std::string& ifname) {
-    std::cout << "DEBUG: setDynamicIP called for interface: " << ifname << std::endl;
-
     if (ifname.empty()) {
-        std::cerr << "ERROR: No interface specified in setDynamicIP" << std::endl;
         return "error(no interface specified)";
     }
 
-    std::string name = "eno1"; // test
-    std::cout << "INFO: Setting DHCP for interface: " << ifname << std::endl;
-    std::cout << "DEBUG: Using interface name: " << name << " for dhcpcd" << std::endl;
-    
-    stopDhcpcd(name);
+    stopDhcpcd(ifname);
+    int pipefd[2];
+    if (pipe(pipefd) == -1) {
+        std::cerr << "ERROR: pipe() failed: " << strerror(errno) << std::endl;
+        return "error(pipe failed)";
+    }
 
     pid_t pid = fork();
     if (pid == -1) {
-        std::cerr << "ERROR: fork() failed in setDynamicIP: " << strerror(errno) << std::endl;
+        std::cerr << "ERROR: fork() failed: " << strerror(errno) << std::endl;
+        close(pipefd[0]);
+        close(pipefd[1]);
         return "error(fork failed)";
     } else if (pid == 0) {
-        std::cout << "DEBUG: Child process executing: dhcpcd -n " << name << std::endl;
-        execlp("dhcpcd", "dhcpcd", "-n", name.c_str(), nullptr);
-        std::cerr << "ERROR: execlp failed: " << strerror(errno) << std::endl;
+        close(pipefd[0]);  // Закрываем конец для чтения
+        dup2(pipefd[1], STDERR_FILENO);  // Перенаправляем stderr в pipe
+        close(pipefd[1]);  // Закрываем оригинальный конец записи
+        execlp("dhcpcd", "dhcpcd", "-n", ifname.c_str(), nullptr);
+        // Если execlp fails, ошибка уже в pipe через stderr
         _exit(EXIT_FAILURE);
     }
 
-    std::cout << "DEBUG: Waiting for dhcpcd process to complete, PID: " << pid << std::endl;
+    close(pipefd[1]);  // Закрываем конец для записи в родителе
     int status;
     waitpid(pid, &status, 0);
-    
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-        std::cout << "INFO: dhcpcd completed successfully for interface: " << ifname << std::endl;
+
+    char buffer[256];
+    ssize_t len = read(pipefd[0], buffer, sizeof(buffer) - 1);
+    close(pipefd[0]);
+    std::string error_msg;
+    if (len > 0) {
+        buffer[len] = '\0';
+        error_msg = buffer;
+        std::cerr << "ERROR from dhcpcd child: " << error_msg << std::endl;
+    }
+
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0 && error_msg.empty()) {
         return getInterfaceInfo(ifname);
     } else {
-        std::cerr << "ERROR: dhcpcd failed for interface: " << ifname 
-                  << ", exit status: " << WEXITSTATUS(status) << std::endl;
-        return "error(dhcpcd failed)";
+        return "error(dhcpcd failed: " + error_msg + ")";
     }
 }
 

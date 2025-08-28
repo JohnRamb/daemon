@@ -1,55 +1,70 @@
 #include "event_loop.h"
 #include <iostream>
-#include <system_error>
-#include <cstring>
-#include <unistd.h>
+#include <sys/epoll.h>
 
 EventLoop::EventLoop() {
-    epoll_fd_ = epoll_create1(0);
-    if (epoll_fd_ == -1) {
-        throw std::system_error(errno, std::generic_category(), "Не удалось создать epoll");
+    base_ = event_base_new();
+    if (!base_) {
+        throw std::runtime_error("Не удалось создать event_base");
     }
 }
 
 EventLoop::~EventLoop() {
-    close(epoll_fd_);
+    for (auto& [fd, ev] : events_) {
+        event_free(ev);
+    }
+    event_base_free(base_);
 }
 
 void EventLoop::add(int fd, uint32_t events, std::function<void(int, uint32_t)> handler) {
-    struct epoll_event ev;
-    ev.events = events;
-    ev.data.fd = fd;
-    handlers_[fd] = handler;
-    if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) == -1) {
-        throw std::system_error(errno, std::generic_category(), "Не удалось добавить fd в epoll");
+    // Переводим epoll-события в libevent
+    short libevent_flags = 0;
+    if (events & EPOLLIN) libevent_flags |= EV_READ;
+    if (events & EPOLLOUT) libevent_flags |= EV_WRITE;
+    libevent_flags |= EV_PERSIST; // Событие не одноразовое
+
+    struct event* ev = event_new(base_, fd, libevent_flags, event_callback, this);
+    if (!ev) {
+        throw std::runtime_error("Не удалось создать событие");
     }
+    if (event_add(ev, nullptr) == -1) {
+        event_free(ev);
+        throw std::runtime_error("Не удалось добавить событие");
+    }
+
+    events_[fd] = ev;
+    handlers_[fd] = handler;
 }
 
 void EventLoop::remove(int fd) {
-    if (epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr) == -1) {
-        std::cerr << "Не удалось удалить fd из epoll: " << strerror(errno) << std::endl;
+    auto it = events_.find(fd);
+    if (it != events_.end()) {
+        event_free(it->second);
+        events_.erase(it);
+        handlers_.erase(fd);
     }
-    handlers_.erase(fd);
 }
 
 void EventLoop::run() {
-    struct epoll_event events[10];
-    while (running_) {
-        int nfds = epoll_wait(epoll_fd_, events, 10, -1);
-        if (nfds == -1) {
-            if (errno == EINTR) continue;
-            throw std::system_error(errno, std::generic_category(), "Ошибка epoll_wait");
-        }
-        for (int i = 0; i < nfds; ++i) {
-            int fd = events[i].data.fd;
-            uint32_t ev = events[i].events;
-            if (handlers_.count(fd)) {
-                handlers_[fd](fd, ev);
-            }
-        }
+    running_ = true;
+    if (event_base_dispatch(base_) == -1) {
+        throw std::runtime_error("Ошибка в event_base_dispatch");
     }
 }
 
 void EventLoop::stop() {
     running_ = false;
+    event_base_loopexit(base_, nullptr);
+}
+
+void EventLoop::event_callback(evutil_socket_t fd, short events, void* arg) {
+    EventLoop* loop = static_cast<EventLoop*>(arg);
+    uint32_t epoll_events = 0;
+    if (events & EV_READ) epoll_events |= EPOLLIN;
+    if (events & EV_WRITE) epoll_events |= EPOLLOUT;
+
+    auto it = loop->handlers_.find(fd);
+    if (it != loop->handlers_.end()) {
+        it->second(fd, epoll_events);
+    }
 }

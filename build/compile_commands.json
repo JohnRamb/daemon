@@ -1,0 +1,50 @@
+[
+{
+  "directory": "/home/amc_wsl/workspace/daemon/build",
+  "command": "/usr/sbin/g++  -I/home/amc_wsl/workspace/daemon -I/usr/include/libnl3  -Wall -Wextra -Wpedantic -g -std=c++17 -o CMakeFiles/network_daemon.dir/main.cpp.o -c /home/amc_wsl/workspace/daemon/main.cpp",
+  "file": "/home/amc_wsl/workspace/daemon/main.cpp",
+  "output": "CMakeFiles/network_daemon.dir/main.cpp.o"
+},
+{
+  "directory": "/home/amc_wsl/workspace/daemon/build",
+  "command": "/usr/sbin/g++  -I/home/amc_wsl/workspace/daemon -I/usr/include/libnl3  -Wall -Wextra -Wpedantic -g -std=c++17 -o CMakeFiles/network_daemon.dir/event_loop.cpp.o -c /home/amc_wsl/workspace/daemon/event_loop.cpp",
+  "file": "/home/amc_wsl/workspace/daemon/event_loop.cpp",
+  "output": "CMakeFiles/network_daemon.dir/event_loop.cpp.o"
+},
+{
+  "directory": "/home/amc_wsl/workspace/daemon/build",
+  "command": "/usr/sbin/g++  -I/home/amc_wsl/workspace/daemon -I/usr/include/libnl3  -Wall -Wextra -Wpedantic -g -std=c++17 -o CMakeFiles/network_daemon.dir/netlink_manager.cpp.o -c /home/amc_wsl/workspace/daemon/netlink_manager.cpp",
+  "file": "/home/amc_wsl/workspace/daemon/netlink_manager.cpp",
+  "output": "CMakeFiles/network_daemon.dir/netlink_manager.cpp.o"
+},
+{
+  "directory": "/home/amc_wsl/workspace/daemon/build",
+  "command": "/usr/sbin/g++  -I/home/amc_wsl/workspace/daemon -I/usr/include/libnl3  -Wall -Wextra -Wpedantic -g -std=c++17 -o CMakeFiles/network_daemon.dir/unix_socket_server.cpp.o -c /home/amc_wsl/workspace/daemon/unix_socket_server.cpp",
+  "file": "/home/amc_wsl/workspace/daemon/unix_socket_server.cpp",
+  "output": "CMakeFiles/network_daemon.dir/unix_socket_server.cpp.o"
+},
+{
+  "directory": "/home/amc_wsl/workspace/daemon/build",
+  "command": "/usr/sbin/g++  -I/home/amc_wsl/workspace/daemon -I/usr/include/libnl3  -Wall -Wextra -Wpedantic -g -std=c++17 -o CMakeFiles/network_daemon.dir/network_manager.cpp.o -c /home/amc_wsl/workspace/daemon/network_manager.cpp",
+  "file": "/home/amc_wsl/workspace/daemon/network_manager.cpp",
+  "output": "CMakeFiles/network_daemon.dir/network_manager.cpp.o"
+},
+{
+  "directory": "/home/amc_wsl/workspace/daemon/build",
+  "command": "/usr/sbin/g++  -I/home/amc_wsl/workspace/daemon -I/usr/include/libnl3  -Wall -Wextra -Wpedantic -g -std=c++17 -o CMakeFiles/network_daemon.dir/network_daemon.cpp.o -c /home/amc_wsl/workspace/daemon/network_daemon.cpp",
+  "file": "/home/amc_wsl/workspace/daemon/network_daemon.cpp",
+  "output": "CMakeFiles/network_daemon.dir/network_daemon.cpp.o"
+},
+{
+  "directory": "/home/amc_wsl/workspace/daemon/build",
+  "command": "/usr/sbin/g++  -I/home/amc_wsl/workspace/daemon -I/usr/include/libnl3  -Wall -Wextra -Wpedantic -g -std=c++17 -o CMakeFiles/network_daemon.dir/command_processor.cpp.o -c /home/amc_wsl/workspace/daemon/command_processor.cpp",
+  "file": "/home/amc_wsl/workspace/daemon/command_processor.cpp",
+  "output": "CMakeFiles/network_daemon.dir/command_processor.cpp.o"
+},
+{
+  "directory": "/home/amc_wsl/workspace/daemon/build",
+  "command": "/usr/sbin/g++  -I/home/amc_wsl/workspace/daemon -I/usr/include/libnl3  -Wall -Wextra -Wpedantic -g -std=c++17 -o CMakeFiles/network_daemon.dir/s_expression_parser.cpp.o -c /home/amc_wsl/workspace/daemon/s_expression_parser.cpp",
+  "file": "/home/amc_wsl/workspace/daemon/s_expression_parser.cpp",
+  "output": "CMakeFiles/network_daemon.dir/s_expression_parser.cpp.o"
+}
+]

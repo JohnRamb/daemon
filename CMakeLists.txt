@@ -10,6 +10,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic")
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBNL REQUIRED libnl-3.0 libnl-route-3.0)
+pkg_check_modules(LIBEVENT REQUIRED libevent)
 
 set(SOURCES
     main.cpp
@@ -34,18 +35,22 @@ add_executable(network_daemon ${SOURCES})
 target_include_directories(network_daemon PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${LIBNL_INCLUDE_DIRS}
+    ${LIBEVENT_INCLUDE_DIRS}
 )
 
 target_link_libraries(network_daemon PRIVATE
     ${LIBNL_LIBRARIES}
+    ${LIBEVENT_LIBRARIES}
 )
 
 # Установка целевых каталогов для библиотек
-link_directories(${LIBNL_LIBRARY_DIRS})
+link_directories(${LIBNL_LIBRARY_DIRS} ${LIBEVENT_LIBRARY_DIRS})
 
 # Добавляем каталоги для поиска заголовков
-include_directories(${LIBNL_INCLUDE_DIRS})
+include_directories(${LIBNL_INCLUDE_DIRS} ${LIBEVENT_INCLUDE_DIRS})
 
 # Вывод информации о найденных библиотеках
 message(STATUS "libnl include directories: ${LIBNL_INCLUDE_DIRS}")
 message(STATUS "libnl libraries: ${LIBNL_LIBRARIES}")
+message(STATUS "libevent include directories: ${LIBEVENT_INCLUDE_DIRS}")
+message(STATUS "libevent libraries: ${LIBEVENT_LIBRARIES}")

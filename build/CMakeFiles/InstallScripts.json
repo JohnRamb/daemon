@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/amc_wsl/workspace/daemon/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
