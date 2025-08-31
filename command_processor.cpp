@@ -47,6 +47,7 @@ void CommandProcessor::handleCommand(int client_fd, const std::string& command) 
         return;
     } else if (cmd == "off" && tokens.size() == 2) {
         response = handleOff(tokens[1]);
+        return;
     } else if (cmd == "dhcpOn" && tokens.size() == 2) {
         response = handleDhcpOn(tokens[1]);
         return;

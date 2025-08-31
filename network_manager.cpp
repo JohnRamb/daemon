@@ -65,24 +65,34 @@ std::string NetworkManager::setDynamicIP(const std::string& ifname) {
 }
 
 void NetworkManager::stopDhcpcd(const std::string& ifname) {
-    std::cout << "DEBUG: stopDhcpcd called for interface: " << ifname << std::endl;
-    
-    if (!ifname.empty()) {
-        std::cout << "INFO: Stopping dhcpcd for interface: " << ifname << std::endl;
-        
-        pid_t pid = fork();
-        if (pid == 0) {
-            std::cout << "DEBUG: Child process executing: dhcpcd -k " << ifname << std::endl;
-            execlp("dhcpcd", "dhcpcd", "-k", ifname.c_str(), nullptr);
-            std::cerr << "ERROR: execlp failed in stopDhcpcd: " << strerror(errno) << std::endl;
-            _exit(EXIT_FAILURE);
-        }
-        
-        std::cout << "DEBUG: Waiting for dhcpcd stop process, PID: " << pid << std::endl;
-        waitpid(pid, nullptr, 0);
-        std::cout << "INFO: dhcpcd stopped for interface: " << ifname << std::endl;
+    if (ifname.empty()) {
+        std::cerr << "ERROR: Empty interface name provided" << std::endl;
+        return;
+    }
+
+    // Проверка существования интерфейса
+    struct nl_cache* link_cache = netlink_mgr_.getLinkCache();
+    if (!link_cache || !rtnl_link_get_by_name(link_cache, ifname.c_str())) {
+        std::cerr << "ERROR: Interface " << ifname << " not found" << std::endl;
+        return;
+    }
+
+    pid_t pid = fork();
+    if (pid == -1) {
+        std::cerr << "ERROR: fork() failed: " << strerror(errno) << std::endl;
+        return;
+    } else if (pid == 0) {
+        execlp("dhcpcd", "dhcpcd", "-k", ifname.c_str(), nullptr);
+        std::cerr << "ERROR: execlp failed: " << strerror(errno) << std::endl;
+        _exit(EXIT_FAILURE);
+    }
+
+    int status;
+    waitpid(pid, &status, 0);
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        std::cerr << "ERROR: dhcpcd -k failed for interface: " << ifname << std::endl;
     } else {
-        std::cout << "WARNING: stopDhcpcd called with empty interface name" << std::endl;
+        std::cout << "INFO: dhcpcd stopped for interface: " << ifname << std::endl;
     }
 }
 

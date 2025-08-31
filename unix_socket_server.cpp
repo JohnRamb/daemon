@@ -16,28 +16,10 @@ UnixSocketServer::UnixSocketServer(EventLoop& loop, const std::string& socket_pa
         throw std::runtime_error("EventLoop::get_event_base() returned nullptr");
     }
     std::cout << "UnixSocketServer: event_base is valid: " << base << std::endl;
-
-    timer_event_ = evtimer_new(base, timer_callback, this);
-    if (!timer_event_) {
-        throw std::runtime_error("Failed to create timer_event_");
-    }
-    std::cout << "UnixSocketServer: timer_event_ created: " << timer_event_ << std::endl;
-
-    struct timeval tv = {30, 0}; // Проверка каждые 30 секунд
-    if (event_add(timer_event_, &tv) == -1) {
-        event_free(timer_event_);
-        timer_event_ = nullptr;
-        throw std::runtime_error("Failed to add timer event");
-    }
-    std::cout << "UnixSocketServer: Timer added successfully" << std::endl;
 }
 
 UnixSocketServer::~UnixSocketServer() {
     stop();
-    if (timer_event_) {
-        event_free(timer_event_);
-        timer_event_ = nullptr;
-    }
 }
 
 void UnixSocketServer::start() {
@@ -157,27 +139,5 @@ void UnixSocketServer::sendResponse(int client_fd, const std::string& response) 
 void UnixSocketServer::broadcastToAllClients(const std::string& message) {
     for (const auto& [fd, _] : client_handlers_) {
         sendResponse(fd, message);
-    }
-}
-
-void UnixSocketServer::checkTimeouts() {
-    auto now = std::chrono::steady_clock::now();
-    for (auto it = client_last_activity_.begin(); it != client_last_activity_.end();) {
-        if (std::chrono::duration_cast<std::chrono::seconds>(now - it->second).count() > 30) {
-            std::cout << "Таймаут для клиента fd=" << it->first << std::endl;
-            cleanupClient(it->first);
-            it = client_last_activity_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
-void UnixSocketServer::timer_callback([[maybe_unused]] evutil_socket_t fd, [[maybe_unused]] short events, void* arg) {
-    UnixSocketServer* server = static_cast<UnixSocketServer*>(arg);
-    server->checkTimeouts();
-    struct timeval tv = {30, 0}; // Перезапускаем таймер
-    if (event_add(server->timer_event_, &tv) == -1) {
-        std::cerr << "Failed to re-add timer event" << std::endl;
     }
 }

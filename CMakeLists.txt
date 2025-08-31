@@ -54,3 +54,5 @@ message(STATUS "libnl include directories: ${LIBNL_INCLUDE_DIRS}")
 message(STATUS "libnl libraries: ${LIBNL_LIBRARIES}")
 message(STATUS "libevent include directories: ${LIBEVENT_INCLUDE_DIRS}")
 message(STATUS "libevent libraries: ${LIBEVENT_LIBRARIES}")
+
+#add_subdirectory(tests)

@@ -2,20 +2,50 @@
 
 # Import necessary modules
 import sys
+import socket
+import os
+import re
+import time
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
                              QLabel, QLineEdit, QComboBox, QCheckBox, QPushButton, 
                              QRadioButton, QListWidget, QMessageBox, QTextEdit, 
                              QSplitter, QFrame)
-from PyQt5.QtCore import Qt
-import socket
-import os
-import re
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+
+class SocketThread(QThread):
+    """Thread for handling socket operations asynchronously"""
+    response_signal = pyqtSignal(str)
+    error_signal = pyqtSignal(str)
+
+    def __init__(self, sock, command):
+        super().__init__()
+        self.sock = sock
+        self.command = command
+
+    def run(self):
+        try:
+            self.sock.settimeout(5.0)  # Set timeout for socket operations
+            self.sock.sendall(self.command.encode())
+            response = ""
+            while True:
+                chunk = self.sock.recv(1024).decode()
+                if not chunk:
+                    break
+                response += chunk
+                if len(chunk) < 1024:
+                    break
+            self.response_signal.emit(response)
+        except socket.timeout:
+            self.error_signal.emit('Socket operation timed out')
+        except Exception as e:
+            self.error_signal.emit(str(e))
 
 class NetworkTester(QWidget):
     def __init__(self):
         super().__init__()
         self.socket_path = '/tmp/network_daemon.sock'
         self.sock = None
+        self.interfaces = {}  # Dictionary to store interface parameters
         self.initUI()
         self.connect_to_socket()
         self.load_interfaces()
@@ -126,8 +156,8 @@ class NetworkTester(QWidget):
         self.static_radio.toggled.connect(self.toggle_static_fields)
 
     def log_message(self, message):
-        """Add message to log window"""
-        self.log_text.append(f"{message}")
+        """Add message to log window with timestamp"""
+        self.log_text.append(f"[{time.strftime('%H:%M:%S')}] {message}")
         # Auto-scroll to bottom
         self.log_text.verticalScrollBar().setValue(
             self.log_text.verticalScrollBar().maximum()
@@ -140,9 +170,15 @@ class NetworkTester(QWidget):
     def connect_to_socket(self):
         """Establish connection to the socket"""
         try:
+            if not os.path.exists(self.socket_path):
+                error_msg = f'Socket file {self.socket_path} does not exist'
+                self.status_label.setText(f'Status: {error_msg}')
+                self.log_message(f'ERROR: {error_msg}')
+                return
             if self.sock:
                 self.sock.close()
             self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.settimeout(5.0)  # Set timeout for connection
             self.sock.connect(self.socket_path)
             self.status_label.setText('Status: Connected to daemon')
             self.log_message('Connected to daemon socket')
@@ -189,39 +225,53 @@ class NetworkTester(QWidget):
                 self.log_message(f'ERROR: {error_msg}')
                 return
 
-        response = self.send_command('(enumerate())')
+        self.send_command('(enumerate())')
+
+    def parse_add_message(self, response):
+        """Parse add_iface and add_route messages"""
+        self.log_message(f'Parsing add message: {response}')
+        
         if response.startswith('(error'):
-            error_msg = response[1:-1]  # Extract error message
+            error_msg = response[1:-1]
             self.status_label.setText(f'Status: {error_msg}')
             self.log_message(f'ERROR: {error_msg}')
-            return
+            return False
 
-        if response and response.startswith('(enumerate('):
-            self.interface_combo.clear()
-            
-            # Extract the content within (enumerate(...))
-            interfaces_str = response[10:-1]  # Remove "(enumerate(" and ")"
-            
-            # Use regex to parse individual interface entries
-            # Each entry is like: iface=lo addr=127.0.0.1 mac=00-00-00-00-00-00 gateway=none mask=8 flag=00010049
-            interface_pattern = r'iface=([^\s]+)\s+addr=[^\s]+\s+mac=[^\s]+\s+gateway=[^\s]+\s+mask=[^\s]+\s+flag=[^\s]+'
-            interfaces = re.findall(interface_pattern, interfaces_str)
-            
-            # Add interfaces to combo box
-            for iface in interfaces:
-                self.interface_combo.addItem(iface)
-            
-            if self.interface_combo.count() > 0:
-                self.interface_combo.setCurrentIndex(0)
-                self.log_message(f'Found {self.interface_combo.count()} interfaces')
-            else:
-                error_msg = 'No interfaces found'
-                self.status_label.setText(f'Status: {error_msg}')
-                self.log_message(f'ERROR: {error_msg} - Response: {response}')
+        # Pattern for add_iface and add_route
+        pattern = r'\((add_iface|add_route|del_iface|del_route)\(iface=([^\s]+)\s+addr=([^\s]+)\s+mac=([^\s]+)\s+gateway=([^\s]+)\s+mask=([^\s]+)\s+flag=([^\s]+)\)\)'
+        match = re.match(pattern, response)
+        
+        if match:
+            cmd, iface, addr, mac, gateway, mask, flag = match.groups()
+            iface = iface.strip('()')  # Clean interface name
+            if cmd == 'add_iface':
+                # Add interface to combo box and interfaces dictionary
+                self.interfaces[iface] = {
+                    'addr': addr, 'mac': mac, 'gateway': gateway, 'mask': mask, 'flag': flag
+                }
+                if iface not in [self.interface_combo.itemText(i) for i in range(self.interface_combo.count())]:
+                    self.interface_combo.addItem(iface)
+                    self.log_message(f'Added interface: {iface}')
+                    self.status_label.setText(f'Status: Interface {iface} added')
+                else:
+                    self.log_message(f'Interface {iface} already exists')
+                
+                # Update interface info if the added interface is selected
+                if self.interface_combo.currentText() == iface:
+                    self.ip_edit.setText(addr if addr != 'none' else '')
+                    self.mask_edit.setText(mask if mask != 'none' else '')
+                    self.gateway_edit.setText(gateway if gateway != 'none' else '')
+                    self.enable_check.setChecked('00011043' in flag)  # Example: Assume flag indicates up/down
+                    self.log_message(f'Updated info for {iface}: addr={addr}, mac={mac}, gateway={gateway}, mask={mask}, flag={flag}')
+                
+            elif cmd == 'add_route':
+                route_info = f'Route added: iface={iface}, addr={addr}, mac={mac}, gateway={gateway}, mask={mask}, flag={flag}'
+                self.log_message(route_info)
+                self.status_label.setText(f'Status: Route added for {iface}')
+            return True
         else:
-            error_msg = 'Failed to load interfaces'
-            self.status_label.setText(f'Status: {error_msg}')
-            self.log_message(f'ERROR: {error_msg} - Response: {response}')
+            self.log_message(f'ERROR: Failed to parse add message: {response}')
+            return False
 
     def refresh_interface_info(self):
         """Refresh information for the selected interface"""
@@ -235,19 +285,10 @@ class NetworkTester(QWidget):
             self.log_message('ERROR: No interface selected')
             return
         
+        # Ensure interface name is clean
+        interface = interface.strip('()')
         self.log_message(f'Refreshing info for interface: {interface}')
-        
-        # Get interface status
-        status_response = self.send_command(f'(status({interface}))')
-        if status_response:
-            self.parse_interface_status(status_response)
-        
-        # Get IP configuration
-        ip_response = self.send_command(f'(getIP({interface}))')
-        if ip_response:
-            self.parse_ip_config(ip_response)
-        
-        # Load DNS
+        self.send_command(f'(status({interface}))')
         self.load_dns()
 
     def parse_interface_status(self, response):
@@ -260,7 +301,6 @@ class NetworkTester(QWidget):
             self.log_message(f'ERROR: {error_msg}')
             return
         
-        # Example response: "(status(eno1,up))" or "(status(eno1,down))"
         if 'up' in response.lower():
             self.enable_check.setChecked(True)
             self.status_label.setText('Status: Interface is UP')
@@ -276,49 +316,7 @@ class NetworkTester(QWidget):
         """Parse IP configuration"""
         self.log_message(f'Parsing IP config: {response}')
         
-        if response.startswith('(error'):
-            error_msg = response[1:-1]
-            self.status_label.setText(f'Status: {error_msg}')
-            self.log_message(f'ERROR: {error_msg}')
-            return
-        
-        # Example DHCP response: "(dhcpOn(eno1:192.168.130.207:none:UP:192.168.130.196))"
-        # Example static response: "(setStatic(eno1,192.168.1.100,24,192.168.1.1))"
-        if response.startswith('(dhcpOn('):
-            self.dynamic_radio.setChecked(True)
-            self.toggle_static_fields(False)
-            
-            # Parse DHCP response
-            match = re.search(r'\(dhcpOn\(([^:]+):([^:]+):([^:]+):([^:]+):([^)]+)\)\)', response)
-            if match:
-                iface, ip, mask, status, gateway = match.groups()
-                self.ip_edit.setText(ip)
-                self.mask_edit.setText(mask if mask != 'none' else '')
-                self.gateway_edit.setText(gateway if gateway != 'none' else '')
-                status_msg = f'DHCP configured - IP: {ip}, Gateway: {gateway}'
-                self.status_label.setText(f'Status: {status_msg}')
-                self.log_message(status_msg)
-            else:
-                self.log_message(f'ERROR: Failed to parse DHCP response: {response}')
-                
-        elif response.startswith('(setStatic('):
-            self.static_radio.setChecked(True)
-            self.toggle_static_fields(True)
-            
-            # Parse static response
-            match = re.search(r'\(setStatic\(([^,]+),([^,]+),([^,]+),([^)]+)\)\)', response)
-            if match:
-                iface, ip, mask, gateway = match.groups()
-                self.ip_edit.setText(ip)
-                self.mask_edit.setText(mask)
-                self.gateway_edit.setText(gateway)
-                status_msg = f'Static configured - IP: {ip}, Mask: {mask}, Gateway: {gateway}'
-                self.status_label.setText(f'Status: {status_msg}')
-                self.log_message(status_msg)
-            else:
-                self.log_message(f'ERROR: Failed to parse static response: {response}')
-        
-        elif response.startswith('(on(') or response.startswith('(off('):
+        if response.startswith('(on(') or response.startswith('(off(') or response.startswith('(dhcpOn('):
             if 'success' in response.lower():
                 self.status_label.setText('Status: Operation completed successfully')
                 self.log_message('Operation completed successfully')
@@ -343,7 +341,7 @@ class NetworkTester(QWidget):
             self.log_message(f'ERROR: {error_msg}')
 
     def send_command(self, command):
-        """Send command through the socket"""
+        """Send command through the socket asynchronously"""
         if not self.sock:
             self.reconnect_socket()
             if not self.sock:
@@ -352,19 +350,90 @@ class NetworkTester(QWidget):
                 self.log_message(f'ERROR: {error_msg}')
                 return ''
         
-        try:
-            self.log_message(f'Sending command: {command}')
-            self.sock.sendall(command.encode())
-            response = self.sock.recv(1024).decode()
-            self.log_message(f'Received response: {response}')
-            self.status_label.setText(f'Status: Command executed - {response[:50]}...')
-            return response
-        except Exception as e:
-            error_msg = f'Failed to send command - {str(e)}'
+        self.log_message(f'Sending command: {command}')
+        self.thread = SocketThread(self.sock, command)
+        self.thread.response_signal.connect(self.handle_response)
+        self.thread.error_signal.connect(self.handle_error)
+        self.thread.start()
+        return ''
+
+    def handle_response(self, response):
+        """Handle response from socket thread"""
+        self.log_message(f'Received response: {response}')
+        self.status_label.setText(f'Status: Command executed - {response[:50]}...')
+        if response.startswith('(add_iface(') or response.startswith('(add_route('):
+            self.parse_add_message(response)
+        elif response.startswith('(enumerate('):
+            self.handle_enumerate_response(response)
+        elif response.startswith('(status('):
+            self.parse_interface_status(response)
+        elif response.startswith('(on(') or response.startswith('(off(') or response.startswith('(dhcpOn('):
+            self.parse_ip_config(response)
+
+    def handle_error(self, error):
+        """Handle error from socket thread"""
+        error_msg = f'Failed to send command - {error}'
+        self.status_label.setText(f'Status: {error_msg}')
+        self.log_message(f'ERROR: {error_msg}')
+        self.sock = None
+
+    def handle_enumerate_response(self, response):
+        """Handle response from enumerate command"""
+        self.log_message(f'Raw enumerate response: {response}')
+        
+        if response.startswith('(error'):
+            error_msg = response[1:-1]
             self.status_label.setText(f'Status: {error_msg}')
             self.log_message(f'ERROR: {error_msg}')
-            self.sock = None
-            return ''
+            return
+
+        self.interface_combo.clear()
+        self.interfaces.clear()  # Clear previous interfaces
+        if response.startswith('(enumerate('):
+            interfaces_str = response[10:-1]  # Remove "(enumerate(" and ")"
+            self.log_message(f'Interfaces string: {interfaces_str}')
+            
+            try:
+                # Use regex to extract interface details
+                interface_pattern = r'iface=([^\s,\)]+)\s+addr=([^\s]+)\s+mac=([^\s]+)\s+gateway=([^\s]+)\s+mask=([^\s]+)\s+flag=([^\s]+)'
+                interfaces = re.findall(interface_pattern, interfaces_str)
+                
+                if not interfaces:
+                    error_msg = 'No valid interfaces found'
+                    self.status_label.setText(f'Status: {error_msg}')
+                    self.log_message(f'ERROR: {error_msg} - Response: {response}')
+                    return
+                    
+                for iface, addr, mac, gateway, mask, flag in interfaces:
+                    # Clean interface name
+                    iface = iface.strip('()')
+                    if iface:
+                        self.interface_combo.addItem(iface)
+                        self.interfaces[iface] = {
+                            'addr': addr,
+                            'mac': mac,
+                            'gateway': gateway,
+                            'mask': mask,
+                            'flag': flag
+                        }
+                        self.log_message(f'Added interface: {iface} (addr={addr}, mac={mac}, gateway={gateway}, mask={mask}, flag={flag})')
+                
+                if self.interface_combo.count() > 0:
+                    self.interface_combo.setCurrentIndex(0)
+                    self.log_message(f'Found {self.interface_combo.count()} interfaces')
+                else:
+                    error_msg = 'No valid interfaces found after parsing'
+                    self.status_label.setText(f'Status: {error_msg}')
+                    self.log_message(f'ERROR: {error_msg} - Response: {response}')
+                    
+            except Exception as e:
+                error_msg = f'Failed to parse interfaces: {str(e)}'
+                self.status_label.setText(f'Status: {error_msg}')
+                self.log_message(f'ERROR: {error_msg} - Response: {response}')
+        else:
+            error_msg = 'Unexpected enumerate response format'
+            self.status_label.setText(f'Status: {error_msg}')
+            self.log_message(f'ERROR: {error_msg} - Response: {response}')
 
     def apply_settings(self):
         """Apply network settings"""
@@ -381,17 +450,26 @@ class NetworkTester(QWidget):
             self.log_message('ERROR: No interface selected')
             return
 
-        self.log_message('Applying settings...')
+        # Clean interface name
+        interface = interface.strip('()')
+        self.log_message(f'Applying settings for interface: {interface}')
         
         # Enable/disable network
         if self.enable_check.isChecked():
-            response1 = self.send_command(f'(on({interface}))')
+            self.send_command(f'(on({interface}))')
         else:
-            response1 = self.send_command(f'(off({interface}))')
+            self.send_command(f'(off({interface}))')
 
         # Configure addressing
         if self.dynamic_radio.isChecked():
-            response2 = self.send_command(f'(dhcpOn({interface}))')
+            # Check if interface parameters are available
+            if interface not in self.interfaces:
+                QMessageBox.warning(self, 'Error', f'No parameters available for interface {interface}')
+                self.log_message(f'ERROR: No parameters available for interface {interface}')
+                return
+            params = self.interfaces[interface]
+            dhcp_command = f"(dhcpOn(iface={interface} addr={params['addr']} mac={params['mac']} gateway={params['gateway']} mask={params['mask']} flag={params['flag']}))"
+            self.send_command(dhcp_command)
         else:
             ip = self.ip_edit.text()
             mask = self.mask_edit.text()
@@ -400,15 +478,10 @@ class NetworkTester(QWidget):
                 QMessageBox.warning(self, 'Error', 'All static fields must be filled')
                 self.log_message('ERROR: Static IP fields not complete')
                 return
-            response2 = self.send_command(f'(setStatic({interface},{ip},{mask},{gateway}))')
+            self.send_command(f'(setStatic({interface},{ip},{mask},{gateway}))')
 
         # Refresh information after applying settings
         self.refresh_interface_info()
-
-        # Show results
-        result_msg = f'Network: {response1}\nAddressing: {response2}'
-        QMessageBox.information(self, 'Results', result_msg)
-        self.log_message(f'Apply results: {result_msg}')
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
