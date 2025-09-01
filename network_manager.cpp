@@ -24,19 +24,19 @@ std::string NetworkManager::setDynamicIP(const std::string& ifname) {
         return "error(no interface specified)";
     }
 
-    std::string name = "eno1"; // test
+    //std::string name = "eno1"; // test
     std::cout << "INFO: Setting DHCP for interface: " << ifname << std::endl;
-    std::cout << "DEBUG: Using interface name: " << name << " for dhcpcd" << std::endl;
+    //std::cout << "DEBUG: Using interface name: " << name << " for dhcpcd" << std::endl;
     
-    stopDhcpcd(name);
+    stopDhcpcd(ifname);
 
     pid_t pid = fork();
     if (pid == -1) {
         std::cerr << "ERROR: fork() failed in setDynamicIP: " << strerror(errno) << std::endl;
         return "error(fork failed)";
     } else if (pid == 0) {
-        std::cout << "DEBUG: Child process executing: dhcpcd -n " << name << std::endl;
-        execlp("dhcpcd", "dhcpcd", "-n", name.c_str(), nullptr);
+        std::cout << "DEBUG: Child process executing: dhcpcd -n " << ifname << std::endl;
+        execlp("dhcpcd", "dhcpcd", "-n", ifname.c_str(), nullptr);
         std::cerr << "ERROR: execlp failed: " << strerror(errno) << std::endl;
         _exit(EXIT_FAILURE);
     }

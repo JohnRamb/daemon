@@ -28,6 +28,9 @@ private:
     NetworkManager& network_mgr_;
     std::unique_ptr<CommandSerializer> serializer_;
 
+    std::tuple<std::string, std::string, std::string, std::string> extractNetworkParams(const std::string& s_expression) const;
+    std::string maskToPrefix(const std::string& mask) const;
+    std::string extractInterfaceName(const std::string& s_expression) const;
     std::string getTimestamp() const;
     std::string handleEnumerate();
     std::string handleOn(const std::string& ifname);

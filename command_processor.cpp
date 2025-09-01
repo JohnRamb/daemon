@@ -9,6 +9,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <regex>
 
 CommandProcessor::CommandProcessor(UnixSocketServer& server, NetlinkManager& netlink_mgr, 
                                    NetworkManager& network_mgr, std::unique_ptr<CommandSerializer> serializer)
@@ -40,28 +41,99 @@ void CommandProcessor::handleCommand(int client_fd, const std::string& command) 
     std::string cmd = tokens[0];
     std::string response;
 
-    if (cmd == "enumerate" && tokens.size() == 1) {
+    if (cmd == "enumerate") {
         response = handleEnumerate();
     } else if (cmd == "on" && tokens.size() == 2) {
         response = handleOn(tokens[1]);
         return;
     } else if (cmd == "off" && tokens.size() == 2) {
         response = handleOff(tokens[1]);
+        return;
     } else if (cmd == "dhcpOn" && tokens.size() == 2) {
         response = handleDhcpOn(tokens[1]);
         return;
     } else if (cmd == "dhcpOff" && tokens.size() == 2) {
         response = handleDhcpOff(tokens[1]);
         return;
-    } else if (cmd == "setStatic" && tokens.size() == 5) {
+    } else if (cmd == "setIface" && tokens.size() == 5) {
         response = handleSetStatic(tokens[1], tokens[2], tokens[3], tokens[4]);
     } else {
         response = "error(unknown command or invalid arguments)";
     }
 
+    std::cout << response << std::endl;
     std::string full_response = serializer_->serializeResponse(cmd, response);
     server_.sendResponse(client_fd, full_response);
     std::cout << "[" << getTimestamp() << "] CommandProcessor: Sent response: " << full_response << std::endl;
+}
+
+std::tuple<std::string, std::string, std::string, std::string> 
+CommandProcessor::extractNetworkParams(const std::string& s_expression) const {
+    std::string iface, addr, gateway, mask;
+    
+    // Регулярные выражения для поиска параметров
+    std::regex iface_pattern(R"(iface=([^\s\)]+))");
+    std::regex addr_pattern(R"(addr=([^\s\)]+))");
+    std::regex gateway_pattern(R"(gateway=([^\s\)]+))");
+    std::regex mask_pattern(R"(mask=([^\s\)]+))");
+    
+    std::smatch matches;
+    
+    // Извлекаем имя интерфейса
+    if (std::regex_search(s_expression, matches, iface_pattern) && matches.size() > 1) {
+        iface = matches[1].str();
+    }
+    
+    // Извлекаем IP-адрес
+    if (std::regex_search(s_expression, matches, addr_pattern) && matches.size() > 1) {
+        addr = matches[1].str();
+    }
+    
+    // Извлекаем шлюз
+    if (std::regex_search(s_expression, matches, gateway_pattern) && matches.size() > 1) {
+        gateway = matches[1].str();
+        if (gateway == "none") gateway = "";
+    }
+    
+    // Извлекаем маску и конвертируем в префикс
+    if (std::regex_search(s_expression, matches, mask_pattern) && matches.size() > 1) {
+        mask = matches[1].str();
+        if (mask != "none") {
+            mask = maskToPrefix(mask); // Конвертируем маску в префикс
+        }
+    }
+    
+    return std::make_tuple(iface, addr, mask, gateway);
+}
+
+std::string CommandProcessor::maskToPrefix(const std::string& mask) const {
+    struct in_addr addr;
+    if (inet_pton(AF_INET, mask.c_str(), &addr) != 1) {
+        return "24"; // Значение по умолчанию при ошибке
+    }
+    
+    // Подсчитываем количество установленных битов в маске
+    uint32_t mask_bits = ntohl(addr.s_addr);
+    int prefix_len = 0;
+    
+    while (mask_bits & 0x80000000) {
+        prefix_len++;
+        mask_bits <<= 1;
+    }
+    
+    return std::to_string(prefix_len);
+}
+
+std::string CommandProcessor::extractInterfaceName(const std::string& s_expression) const {
+    // Регулярное выражение для поиска имени интерфейса
+    std::regex iface_pattern(R"(iface=([^\s\)]+))");
+    std::smatch matches;
+    
+    if (std::regex_search(s_expression, matches, iface_pattern) && matches.size() > 1) {
+        return matches[1].str();
+    }
+    
+    return ""; // Возвращаем пустую строку, если не найдено
 }
 
 std::string CommandProcessor::handleEnumerate() {
@@ -74,7 +146,7 @@ std::string CommandProcessor::handleEnumerate() {
     struct nl_object* obj = nl_cache_get_first(link_cache);
     bool first_interface = true;
     
-    ss << "enumerate(";
+    ss << "(";  // Начинаем вывод
     
     while (obj) {
         struct rtnl_link* link = (struct rtnl_link*)obj;
@@ -127,6 +199,8 @@ std::string CommandProcessor::handleEnumerate() {
     }
     
     ss << ")";
+
+    std::cout << ss.str() << std::endl;
     
     return ss.str();
 }
@@ -141,20 +215,34 @@ std::string CommandProcessor::handleOn(const std::string& ifname) {
         return "error(no link cache)";
     }
 
-    struct rtnl_link* link = rtnl_link_get_by_name(link_cache, ifname.c_str());
+    auto [name, ip, prefix, gateway] = extractNetworkParams(ifname);
+
+    struct rtnl_link* link = rtnl_link_get_by_name(link_cache, name.c_str());
     if (!link) {
         return "error(interface not found)";
     }
 
     struct rtnl_link* change = rtnl_link_alloc();
+    if (!change) {
+        rtnl_link_put(link);
+        return "error(failed to allocate memory for link change)";
+    }
+
     rtnl_link_set_flags(change, IFF_UP);
     int err = rtnl_link_change(netlink_mgr_.getSocket(), link, change, 0);
+    
+    // Cleanup
     rtnl_link_put(link);
     rtnl_link_put(change);
 
     if (err < 0) {
         return "error(failed to enable interface: " + std::string(nl_geterror(err)) + ")";
     }
+    
+    // Consider moving this to a separate call or adding error handling
+    
+    handleSetStatic(name, ip, prefix, gateway);
+    
     return "success(interface enabled)";
 }
 
@@ -168,7 +256,9 @@ std::string CommandProcessor::handleOff(const std::string& ifname) {
         return "error(no link cache)";
     }
 
-    struct rtnl_link* link = rtnl_link_get_by_name(link_cache, ifname.c_str());
+     std::string name = extractInterfaceName(ifname);
+
+    struct rtnl_link* link = rtnl_link_get_by_name(link_cache, name.c_str());
     if (!link) {
         return "error(interface not found)";
     }
@@ -189,7 +279,11 @@ std::string CommandProcessor::handleDhcpOn(const std::string& ifname) {
     if (ifname.empty()) {
         return "error(no interface specified)";
     }
-    return network_mgr_.setDynamicIP(ifname);
+
+    //std::string name = extractInterfaceName(ifname);
+    auto [name, ip, prefix, gateway] = extractNetworkParams(ifname);
+
+    return network_mgr_.setDynamicIP(name);
 }
 
 std::string CommandProcessor::handleDhcpOff(const std::string& ifname) {
