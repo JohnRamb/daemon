@@ -8,53 +8,76 @@
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <linux/rtnetlink.h>
-#include <sstream>
-#include <iomanip>
+#include <string>
+#include <optional>
+#include <format>
 #include <iostream>
 #include <chrono>
 #include <signal.h>
 #include <sys/wait.h>
+#include <format>
 
 const char* SOCKET_PATH = "/sdz/control_sock";
 
-// Вспомогательный класс для представления данных события
-struct NetworkEvent {
-    std::string iface;
-    std::string addr;
-    std::string mac;
-    std::string gateway;
-    std::string mask;
-    std::string flags;
+// Класс для представления данных сетевого события
+class NetworkEvent {
+public:
+    NetworkEvent(std::string iface, std::string addr, std::string mac,
+                 std::string gateway, std::string mask, std::string flags)
+        : iface_(std::move(iface)), addr_(std::move(addr)), mac_(std::move(mac)),
+          gateway_(std::move(gateway)), mask_(std::move(mask)), flags_(std::move(flags)) {}
 
     std::string toString() const {
-        std::stringstream ss;
-        ss << "iface=" << iface 
-           << " addr=" << addr
-           << " mac=" << mac
-           << " gateway=" << gateway
-           << " mask=" << mask
-           << " flag=" << flags;
-        return ss.str();
+        return std::format("iface={} addr={} mac={} gateway={} mask={} flag={}",
+                           iface_, addr_, mac_, gateway_, mask_, flags_);
     }
+
+private:
+    std::string iface_;
+    std::string addr_;
+    std::string mac_;
+    std::string gateway_;
+    std::string mask_;
+    std::string flags_;
 };
 
 // Вспомогательная функция для разбора атрибутов Netlink
 template<typename MsgType, int MaxAttr>
-bool parseNetlinkAttributes(struct nlmsghdr* nlh, MsgType* msg, struct nlattr* tb[]) {
-    if (nla_parse(tb, MaxAttr, nlmsg_attrdata(nlh, sizeof(*msg)), nlmsg_attrlen(nlh, sizeof(*msg)), nullptr) < 0) {
+std::optional<std::array<nlattr*, MaxAttr + 1>> parseNetlinkAttributes(nlmsghdr* nlh, MsgType* msg) {
+    std::array<nlattr*, MaxAttr + 1> tb{};
+    if (nla_parse(tb.data(), MaxAttr, nlmsg_attrdata(nlh, sizeof(*msg)), nlmsg_attrlen(nlh, sizeof(*msg)), nullptr) < 0) {
         std::cerr << "[NetworkDaemon] Failed to parse Netlink attributes" << std::endl;
-        return false;
+        return std::nullopt;
     }
-    return true;
+    return tb;
 }
 
+// Вспомогательная функция для преобразования in_addr в строку
+std::optional<std::string> inetToString(const in_addr* addr) {
+    if (!addr) return std::nullopt;
+    char buffer[INET_ADDRSTRLEN];
+    if (inet_ntop(AF_INET, addr, buffer, sizeof(buffer))) {
+        return std::string(buffer);
+    }
+    return std::nullopt;
+}
+
+// Вспомогательная функция для получения имени интерфейса
+std::string getInterfaceName(int ifindex) {
+    char ifname[IFNAMSIZ] = {0};
+    if (if_indextoname(ifindex, ifname)) {
+        return ifname;
+    }
+    return "none";
+}
+
+// Конструктор NetworkDaemon (без изменений, но с лямбда-функциями вместо std::bind)
 NetworkDaemon::NetworkDaemon() 
     : netlink_mgr_(),
       unix_server_(loop_, SOCKET_PATH),
       network_mgr_(netlink_mgr_),
       command_processor_(std::make_unique<CommandProcessor>(
           unix_server_, netlink_mgr_, network_mgr_, std::make_unique<SExpressionParser>())) {
-
     std::cout << "[" << getTimestamp() << "] NetworkDaemon: Starting initialization" << std::endl;
     
     setupSignalHandlers();
@@ -65,9 +88,9 @@ NetworkDaemon::NetworkDaemon()
         netlink_mgr_.init();
         std::cout << "[" << getTimestamp() << "] NetworkDaemon: NetlinkManager initialized successfully" << std::endl;
         
-        netlink_mgr_.setAddrCallback(std::bind(&NetworkDaemon::handleAddrEvent, this, std::placeholders::_1));
-        netlink_mgr_.setLinkCallback(std::bind(&NetworkDaemon::handleLinkEvent, this, std::placeholders::_1));
-        netlink_mgr_.setRouteCallback(std::bind(&NetworkDaemon::handleRouteEvent, this, std::placeholders::_1));
+        netlink_mgr_.setAddrCallback([this](nl_msg* msg) { handleAddrEvent(msg); });
+        netlink_mgr_.setLinkCallback([this](nl_msg* msg) { handleLinkEvent(msg); });
+        netlink_mgr_.setRouteCallback([this](nl_msg* msg) { handleRouteEvent(msg); });
         
         std::cout << "[" << getTimestamp() << "] NetworkDaemon: Netlink callbacks configured" << std::endl;
         
@@ -75,7 +98,7 @@ NetworkDaemon::NetworkDaemon()
                   << netlink_mgr_.getSocketFd() << ")" << std::endl;
 
         loop_.add(netlink_mgr_.getSocketFd(), EPOLLIN, 
-            std::bind(&NetworkDaemon::handleNetlinkEvent, this, std::placeholders::_1, std::placeholders::_2));
+            [this](int fd, uint32_t events) { handleNetlinkEvent(fd, events); });
         
         std::cout << "[" << getTimestamp() << "] NetworkDaemon: Netlink socket added to event loop" << std::endl;
 
@@ -94,40 +117,27 @@ NetworkDaemon::NetworkDaemon()
     std::cout << "[" << getTimestamp() << "] NetworkDaemon: Initialization completed successfully" << std::endl;
 }
 
-void NetworkDaemon::handleLinkEvent(struct nl_msg* msg) {
-    struct nlmsghdr* nlh = nlmsg_hdr(msg);
-    struct ifinfomsg* ifi = (struct ifinfomsg*)nlmsg_data(nlh);
-    struct nlattr* tb[IFLA_MAX + 1] = {0};
-    char ifname[IFNAMSIZ] = {0};
-    char mac_str[18] = {0};
+void NetworkDaemon::handleLinkEvent(nl_msg* msg) {
+    nlmsghdr* nlh = nlmsg_hdr(msg);
+    ifinfomsg* ifi = (ifinfomsg*)nlmsg_data(nlh);
 
-    if (!parseNetlinkAttributes<struct ifinfomsg, IFLA_MAX>(nlh, ifi, tb)) {
-        return;
-    }
-    
-    if (tb[IFLA_IFNAME]) {
-        strncpy(ifname, (char*)nla_data(tb[IFLA_IFNAME]), IFNAMSIZ - 1);
-    }
-    if (tb[IFLA_ADDRESS]) {
-        unsigned char* mac = (unsigned char*)nla_data(tb[IFLA_ADDRESS]);
-        snprintf(mac_str, sizeof(mac_str), "%02x:%02x:%02x:%02x:%02x:%02x",
-                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    auto tb = parseNetlinkAttributes<ifinfomsg, IFLA_MAX>(nlh, ifi);
+    if (!tb) return;
+
+    std::string ifname = tb->at(IFLA_IFNAME) ? std::string(static_cast<char*>(nla_data(tb->at(IFLA_IFNAME)))) : "none";
+    std::string mac_str = "none";
+    if (tb->at(IFLA_ADDRESS)) {
+        auto* mac = static_cast<unsigned char*>(nla_data(tb->at(IFLA_ADDRESS)));
+        mac_str = std::format("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     }
 
     std::string event_type = (nlh->nlmsg_type == RTM_NEWLINK) ? "add_iface" : "del_iface";
-    char flags_buf[9];
-    snprintf(flags_buf, sizeof(flags_buf), "%08x", ifi->ifi_flags);
+    std::string flags = std::format("{:08x}", ifi->ifi_flags);
 
-    NetworkEvent event{
-        ifname[0] ? ifname : "none",
-        "none",
-        tb[IFLA_ADDRESS] ? mac_str : "none",
-        "none",
-        "none",
-        flags_buf
-    };
-
+    NetworkEvent event{ifname, "none", mac_str, "none", "none", flags};
     std::string event_message = command_processor_->getSerializer()->serializeResponse(event_type, event.toString());
+
     try {
         unix_server_.broadcastToAllClients(event_message);
     } catch (const std::exception& e) {
@@ -138,41 +148,26 @@ void NetworkDaemon::handleLinkEvent(struct nl_msg* msg) {
     std::cout << "[" << getTimestamp() << "] NetworkDaemon: " << event_message << std::endl;
 }
 
-void NetworkDaemon::handleAddrEvent(struct nl_msg* msg) {
-    struct nlmsghdr* nlh = nlmsg_hdr(msg);
-    struct ifaddrmsg* ifa = (struct ifaddrmsg*)nlmsg_data(nlh);
-    struct nlattr* tb[IFA_MAX + 1] = {0};
-    char ip_str[INET_ADDRSTRLEN] = {0};
-    char mask_str[INET_ADDRSTRLEN] = {0};
-    char ifname[IFNAMSIZ] = {0};
+void NetworkDaemon::handleAddrEvent(nl_msg* msg) {
+    nlmsghdr* nlh = nlmsg_hdr(msg);
+    ifaddrmsg* ifa = (ifaddrmsg*)nlmsg_data(nlh);
 
-    if (!parseNetlinkAttributes<struct ifaddrmsg, IFA_MAX>(nlh, ifa, tb)) {
-        return;
-    }
-    
-    if (tb[IFA_ADDRESS]) {
-        struct in_addr* addr = (struct in_addr*)nla_data(tb[IFA_ADDRESS]);
-        inet_ntop(AF_INET, addr, ip_str, sizeof(ip_str));
-    }
-    
-    int mask_len = ifa->ifa_prefixlen;
-    uint32_t mask = htonl(~((1U << (32 - mask_len)) - 1));
-    struct in_addr mask_addr = { mask };
-    inet_ntop(AF_INET, &mask_addr, mask_str, sizeof(mask_str));
+    auto tb = parseNetlinkAttributes<ifaddrmsg, IFA_MAX>(nlh, ifa);
+    if (!tb) return;
 
-    if_indextoname(ifa->ifa_index, ifname);
+    std::string ip_str = tb->at(IFA_ADDRESS) ? inetToString(static_cast<in_addr*>(nla_data(tb->at(IFA_ADDRESS)))).value_or("none") : "none";
+    std::string mask_str = "none";
+    if (ifa->ifa_prefixlen) {
+        uint32_t mask = htonl(~((1U << (32 - ifa->ifa_prefixlen)) - 1));
+        in_addr mask_addr{mask};
+        mask_str = inetToString(&mask_addr).value_or("none");
+    }
+    std::string ifname = getInterfaceName(ifa->ifa_index);
 
     std::string event_type = (nlh->nlmsg_type == RTM_NEWADDR) ? "add_addr" : "del_addr";
-    NetworkEvent event{
-        ifname[0] ? ifname : "none",
-        tb[IFA_ADDRESS] ? ip_str : "none",
-        "none",
-        "none",
-        mask_str[0] ? mask_str : "none",
-        "00000000"
-    };
-
+    NetworkEvent event{ifname, ip_str, "none", "none", mask_str, "00000000"};
     std::string event_message = command_processor_->getSerializer()->serializeResponse(event_type, event.toString());
+
     try {
         unix_server_.broadcastToAllClients(event_message);
     } catch (const std::exception& e) {
@@ -183,46 +178,26 @@ void NetworkDaemon::handleAddrEvent(struct nl_msg* msg) {
     std::cout << "[" << getTimestamp() << "] NetworkDaemon: " << event_message << std::endl;
 }
 
-void NetworkDaemon::handleRouteEvent(struct nl_msg* msg) {
-    struct nlmsghdr* nlh = nlmsg_hdr(msg);
-    struct rtmsg* rtm = (struct rtmsg*)nlmsg_data(nlh);
-    struct nlattr* tb[RTA_MAX + 1] = {0};
-    char gw_str[INET_ADDRSTRLEN] = {0};
-    char dst_str[INET_ADDRSTRLEN] = {0};
-    char ifname[IFNAMSIZ] = {0};
+void NetworkDaemon::handleRouteEvent(nl_msg* msg) {
+    nlmsghdr* nlh = nlmsg_hdr(msg);
+    rtmsg* rtm = (rtmsg*)nlmsg_data(nlh);
 
-    if (!parseNetlinkAttributes<struct rtmsg, RTA_MAX>(nlh, rtm, tb)) {
-        return;
-    }
-    
-    if (tb[RTA_GATEWAY]) {
-        struct in_addr* gw = (struct in_addr*)nla_data(tb[RTA_GATEWAY]);
-        inet_ntop(AF_INET, gw, gw_str, sizeof(gw_str));
-    }
-    if (tb[RTA_DST]) {
-        struct in_addr* dst = (struct in_addr*)nla_data(tb[RTA_DST]);
-        inet_ntop(AF_INET, dst, dst_str, sizeof(dst_str));
-    }
-    if (tb[RTA_OIF]) {
-        if_indextoname(*(int*)nla_data(tb[RTA_OIF]), ifname);
-    }
+    auto tb = parseNetlinkAttributes<rtmsg, RTA_MAX>(nlh, rtm);
+    if (!tb) return;
+
+    std::string gw_str = tb->at(RTA_GATEWAY) ? inetToString(static_cast<in_addr*>(nla_data(tb->at(RTA_GATEWAY)))).value_or("none") : "none";
+    std::string dst_str = tb->at(RTA_DST) ? inetToString(static_cast<in_addr*>(nla_data(tb->at(RTA_DST)))).value_or("default") : "default";
+    std::string ifname = tb->at(RTA_OIF) ? getInterfaceName(*static_cast<int*>(nla_data(tb->at(RTA_OIF)))) : "none";
 
     std::string event_type = (nlh->nlmsg_type == RTM_NEWROUTE) ? "add_route" : "del_route";
     // Используем "route0" как идентификатор маршрута вместо реального имени интерфейса
     std::string name = "route0";
-    char flags_buf[9];
-    snprintf(flags_buf, sizeof(flags_buf), "%08x", rtm->rtm_flags);
+    std::string mask = rtm->rtm_dst_len ? std::to_string(rtm->rtm_dst_len) : "none";
+    std::string flags = std::format("{:08x}", rtm->rtm_flags);
 
-    NetworkEvent event{
-        name,
-        tb[RTA_DST] ? dst_str : "default",
-        "none", // MAC-адрес недоступен для маршрута; можно запросить через RTA_OIF
-        tb[RTA_GATEWAY] ? gw_str : "none",
-        rtm->rtm_dst_len ? std::to_string(rtm->rtm_dst_len) : "none",
-        flags_buf
-    };
-
+    NetworkEvent event{name, dst_str, "none" /* MAC-адрес недоступен; можно запросить через RTA_OIF */, gw_str, mask, flags};
     std::string event_message = command_processor_->getSerializer()->serializeResponse(event_type, event.toString());
+
     try {
         unix_server_.broadcastToAllClients(event_message);
     } catch (const std::exception& e) {
