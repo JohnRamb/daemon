@@ -97,7 +97,7 @@ NetworkDaemon::NetworkDaemon()
         std::cout << "[" << getTimestamp() << "] NetworkDaemon: Adding netlink socket to event loop (fd: " 
                   << netlink_mgr_.getSocketFd() << ")" << std::endl;
 
-        loop_.add(netlink_mgr_.getSocketFd(), EPOLLIN, 
+        loop_.add(netlink_mgr_.getSocketFd(), EV_READ, 
             [this](int fd, uint32_t events) { handleNetlinkEvent(fd, events); });
         
         std::cout << "[" << getTimestamp() << "] NetworkDaemon: Netlink socket added to event loop" << std::endl;

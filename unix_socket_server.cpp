@@ -18,7 +18,7 @@ UnixSocketServer::~UnixSocketServer() {
 
 void UnixSocketServer::start() {
     createSocket();
-    loop_.add(server_fd_, EPOLLIN, 
+    loop_.add(server_fd_, EV_READ, 
         std::bind(&UnixSocketServer::handleServerEvent, this, std::placeholders::_1, std::placeholders::_2));
 }
 
@@ -82,7 +82,7 @@ void UnixSocketServer::handleServerEvent(int fd, uint32_t events) {
     }
 
     auto handler = std::bind(&UnixSocketServer::handleClientEvent, this, std::placeholders::_1, std::placeholders::_2);
-    loop_.add(client_fd, EPOLLIN, handler);
+    loop_.add(client_fd, EV_READ, handler);
     client_handlers_[client_fd] = handler;
 }
 

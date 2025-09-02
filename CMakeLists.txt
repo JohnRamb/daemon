@@ -14,7 +14,9 @@ option(ENABLE_DAEMON "Enable daemonization of the network daemon" OFF)
 # Отладочный вывод
 message(STATUS "ENABLE_DAEMON option value: ${ENABLE_DAEMON}")
 
+# Поиск libevent
 find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBEVENT REQUIRED libevent)
 pkg_check_modules(LIBNL REQUIRED libnl-3.0 libnl-route-3.0)
 
 set(SOURCES
@@ -54,12 +56,17 @@ target_compile_definitions(network_daemon PRIVATE
 target_include_directories(network_daemon PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${LIBNL_INCLUDE_DIRS}
+    ${LIBEVENT_INCLUDE_DIRS}
 )
 
 target_link_libraries(network_daemon PRIVATE
     ${LIBNL_LIBRARIES}
+    ${LIBEVENT_LIBRARIES}
+    pthread
 )
 
 # Вывод информации о найденных библиотеках
 message(STATUS "libnl include directories: ${LIBNL_INCLUDE_DIRS}")
 message(STATUS "libnl libraries: ${LIBNL_LIBRARIES}")
+message(STATUS "libevent include directories: ${LIBEVENT_INCLUDE_DIRS}")
+message(STATUS "libevent libraries: ${LIBEVENT_LIBRARIES}")
