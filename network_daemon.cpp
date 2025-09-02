@@ -15,8 +15,38 @@
 #include <signal.h>
 #include <sys/wait.h>
 
-// const char* SOCKET_PATH = "/tmp/network_daemon.sock";
 const char* SOCKET_PATH = "/sdz/control_sock";
+
+// Вспомогательный класс для представления данных события
+struct NetworkEvent {
+    std::string iface;
+    std::string addr;
+    std::string mac;
+    std::string gateway;
+    std::string mask;
+    std::string flags;
+
+    std::string toString() const {
+        std::stringstream ss;
+        ss << "iface=" << iface 
+           << " addr=" << addr
+           << " mac=" << mac
+           << " gateway=" << gateway
+           << " mask=" << mask
+           << " flag=" << flags;
+        return ss.str();
+    }
+};
+
+// Вспомогательная функция для разбора атрибутов Netlink
+template<typename MsgType, int MaxAttr>
+bool parseNetlinkAttributes(struct nlmsghdr* nlh, MsgType* msg, struct nlattr* tb[]) {
+    if (nla_parse(tb, MaxAttr, nlmsg_attrdata(nlh, sizeof(*msg)), nlmsg_attrlen(nlh, sizeof(*msg)), nullptr) < 0) {
+        std::cerr << "[NetworkDaemon] Failed to parse Netlink attributes" << std::endl;
+        return false;
+    }
+    return true;
+}
 
 NetworkDaemon::NetworkDaemon() 
     : netlink_mgr_(),
@@ -35,14 +65,12 @@ NetworkDaemon::NetworkDaemon()
         netlink_mgr_.init();
         std::cout << "[" << getTimestamp() << "] NetworkDaemon: NetlinkManager initialized successfully" << std::endl;
         
-        // Устанавливаем колбэки как методы этого класса
         netlink_mgr_.setAddrCallback(std::bind(&NetworkDaemon::handleAddrEvent, this, std::placeholders::_1));
         netlink_mgr_.setLinkCallback(std::bind(&NetworkDaemon::handleLinkEvent, this, std::placeholders::_1));
         netlink_mgr_.setRouteCallback(std::bind(&NetworkDaemon::handleRouteEvent, this, std::placeholders::_1));
         
         std::cout << "[" << getTimestamp() << "] NetworkDaemon: Netlink callbacks configured" << std::endl;
         
-        // Добавляем netlink сокет в цикл событий
         std::cout << "[" << getTimestamp() << "] NetworkDaemon: Adding netlink socket to event loop (fd: " 
                   << netlink_mgr_.getSocketFd() << ")" << std::endl;
 
@@ -66,15 +94,16 @@ NetworkDaemon::NetworkDaemon()
     std::cout << "[" << getTimestamp() << "] NetworkDaemon: Initialization completed successfully" << std::endl;
 }
 
-// Реализация методов-колбэков
 void NetworkDaemon::handleLinkEvent(struct nl_msg* msg) {
     struct nlmsghdr* nlh = nlmsg_hdr(msg);
     struct ifinfomsg* ifi = (struct ifinfomsg*)nlmsg_data(nlh);
-    struct nlattr* tb[IFLA_MAX + 1];
+    struct nlattr* tb[IFLA_MAX + 1] = {0};
     char ifname[IFNAMSIZ] = {0};
     char mac_str[18] = {0};
 
-    nla_parse(tb, IFLA_MAX, nlmsg_attrdata(nlh, sizeof(*ifi)), nlmsg_attrlen(nlh, sizeof(*ifi)), NULL);
+    if (!parseNetlinkAttributes<struct ifinfomsg, IFLA_MAX>(nlh, ifi, tb)) {
+        return;
+    }
     
     if (tb[IFLA_IFNAME]) {
         strncpy(ifname, (char*)nla_data(tb[IFLA_IFNAME]), IFNAMSIZ - 1);
@@ -85,11 +114,26 @@ void NetworkDaemon::handleLinkEvent(struct nl_msg* msg) {
                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     }
 
-    // Генерируем S-выражение и отправляем клиентам
-    std::string event_message = formatLinkEvent(nlh, ifi, tb, ifname, mac_str);
-    unix_server_.broadcastToAllClients(event_message);
+    std::string event_type = (nlh->nlmsg_type == RTM_NEWLINK) ? "add_iface" : "del_iface";
+    char flags_buf[9];
+    snprintf(flags_buf, sizeof(flags_buf), "%08x", ifi->ifi_flags);
 
-    // Логирование
+    NetworkEvent event{
+        ifname[0] ? ifname : "none",
+        "none",
+        tb[IFLA_ADDRESS] ? mac_str : "none",
+        "none",
+        "none",
+        flags_buf
+    };
+
+    std::string event_message = command_processor_->getSerializer()->serializeResponse(event_type, event.toString());
+    try {
+        unix_server_.broadcastToAllClients(event_message);
+    } catch (const std::exception& e) {
+        std::cerr << "[" << getTimestamp() << "] NetworkDaemon: Failed to broadcast link event: " << e.what() << std::endl;
+    }
+
     std::string msg_type = (nlh->nlmsg_type == RTM_NEWLINK) ? "NEWLINK" : "DELLINK";
     std::cout << "[" << getTimestamp() << "] NetworkDaemon: " << event_message << std::endl;
 }
@@ -97,12 +141,14 @@ void NetworkDaemon::handleLinkEvent(struct nl_msg* msg) {
 void NetworkDaemon::handleAddrEvent(struct nl_msg* msg) {
     struct nlmsghdr* nlh = nlmsg_hdr(msg);
     struct ifaddrmsg* ifa = (struct ifaddrmsg*)nlmsg_data(nlh);
-    struct nlattr* tb[IFA_MAX + 1];
+    struct nlattr* tb[IFA_MAX + 1] = {0};
     char ip_str[INET_ADDRSTRLEN] = {0};
     char mask_str[INET_ADDRSTRLEN] = {0};
     char ifname[IFNAMSIZ] = {0};
 
-    nla_parse(tb, IFA_MAX, nlmsg_attrdata(nlh, sizeof(*ifa)), nlmsg_attrlen(nlh, sizeof(*ifa)), NULL);
+    if (!parseNetlinkAttributes<struct ifaddrmsg, IFA_MAX>(nlh, ifa, tb)) {
+        return;
+    }
     
     if (tb[IFA_ADDRESS]) {
         struct in_addr* addr = (struct in_addr*)nla_data(tb[IFA_ADDRESS]);
@@ -116,11 +162,23 @@ void NetworkDaemon::handleAddrEvent(struct nl_msg* msg) {
 
     if_indextoname(ifa->ifa_index, ifname);
 
-    // Генерируем S-выражение и отправляем клиентам
-    std::string event_message = formatAddrEvent(nlh, ifa, tb, ifname, ip_str, mask_str, mask_len);
-    unix_server_.broadcastToAllClients(event_message);
+    std::string event_type = (nlh->nlmsg_type == RTM_NEWADDR) ? "add_addr" : "del_addr";
+    NetworkEvent event{
+        ifname[0] ? ifname : "none",
+        tb[IFA_ADDRESS] ? ip_str : "none",
+        "none",
+        "none",
+        mask_str[0] ? mask_str : "none",
+        "00000000"
+    };
 
-    // Логирование
+    std::string event_message = command_processor_->getSerializer()->serializeResponse(event_type, event.toString());
+    try {
+        unix_server_.broadcastToAllClients(event_message);
+    } catch (const std::exception& e) {
+        std::cerr << "[" << getTimestamp() << "] NetworkDaemon: Failed to broadcast addr event: " << e.what() << std::endl;
+    }
+
     std::string msg_type = (nlh->nlmsg_type == RTM_NEWADDR) ? "NEWADDR" : "DELADDR";
     std::cout << "[" << getTimestamp() << "] NetworkDaemon: " << event_message << std::endl;
 }
@@ -128,12 +186,14 @@ void NetworkDaemon::handleAddrEvent(struct nl_msg* msg) {
 void NetworkDaemon::handleRouteEvent(struct nl_msg* msg) {
     struct nlmsghdr* nlh = nlmsg_hdr(msg);
     struct rtmsg* rtm = (struct rtmsg*)nlmsg_data(nlh);
-    struct nlattr* tb[RTA_MAX + 1];
+    struct nlattr* tb[RTA_MAX + 1] = {0};
     char gw_str[INET_ADDRSTRLEN] = {0};
     char dst_str[INET_ADDRSTRLEN] = {0};
     char ifname[IFNAMSIZ] = {0};
 
-    nla_parse(tb, RTA_MAX, nlmsg_attrdata(nlh, sizeof(*rtm)), nlmsg_attrlen(nlh, sizeof(*rtm)), NULL);
+    if (!parseNetlinkAttributes<struct rtmsg, RTA_MAX>(nlh, rtm, tb)) {
+        return;
+    }
     
     if (tb[RTA_GATEWAY]) {
         struct in_addr* gw = (struct in_addr*)nla_data(tb[RTA_GATEWAY]);
@@ -147,69 +207,31 @@ void NetworkDaemon::handleRouteEvent(struct nl_msg* msg) {
         if_indextoname(*(int*)nla_data(tb[RTA_OIF]), ifname);
     }
 
-    // Генерируем S-выражение и отправляем клиентам
+    std::string event_type = (nlh->nlmsg_type == RTM_NEWROUTE) ? "add_route" : "del_route";
+    // Используем "route0" как идентификатор маршрута вместо реального имени интерфейса
     std::string name = "route0";
-    std::string event_message = formatRouteEvent(nlh, rtm, tb, name.c_str()/*ifname*/, dst_str, gw_str);
-    unix_server_.broadcastToAllClients(event_message);
+    char flags_buf[9];
+    snprintf(flags_buf, sizeof(flags_buf), "%08x", rtm->rtm_flags);
 
-    // Логирование
+    NetworkEvent event{
+        name,
+        tb[RTA_DST] ? dst_str : "default",
+        "none", // MAC-адрес недоступен для маршрута; можно запросить через RTA_OIF
+        tb[RTA_GATEWAY] ? gw_str : "none",
+        rtm->rtm_dst_len ? std::to_string(rtm->rtm_dst_len) : "none",
+        flags_buf
+    };
+
+    std::string event_message = command_processor_->getSerializer()->serializeResponse(event_type, event.toString());
+    try {
+        unix_server_.broadcastToAllClients(event_message);
+    } catch (const std::exception& e) {
+        std::cerr << "[" << getTimestamp() << "] NetworkDaemon: Failed to broadcast route event: " << e.what() << std::endl;
+    }
+
     std::string msg_type = (nlh->nlmsg_type == RTM_NEWROUTE) ? "NEWROUTE" : "DELROUTE";
     std::cout << "[" << getTimestamp() << "] NetworkDaemon: " << event_message << std::endl;
 }
-
-// Методы форматирования событий
-std::string NetworkDaemon::formatLinkEvent(struct nlmsghdr* nlh, struct ifinfomsg* ifi, 
-                                         struct nlattr* tb[], const char* ifname, const char* mac_str) {
-    std::string event_type = (nlh->nlmsg_type == RTM_NEWLINK) ? "add_iface" : "del_iface";
-    
-    char flags_buf[9];
-    snprintf(flags_buf, sizeof(flags_buf), "%08x", ifi->ifi_flags);
-    
-    std::stringstream ss;
-    ss << "iface=" << ifname 
-       << " addr=none"
-       << " mac=" << (tb[IFLA_ADDRESS] ? mac_str : "none")
-       << " gateway=none"
-       << " mask=none"
-       << " flag=" << flags_buf;
-    
-    return command_processor_->getSerializer()->serializeResponse(event_type, ss.str());
-}
-
-std::string NetworkDaemon::formatAddrEvent(struct nlmsghdr* nlh, struct ifaddrmsg* ifa,
-                                         struct nlattr* tb[], const char* ifname, 
-                                         const char* ip_str, const char* mask_str, int mask_len) {
-    std::string event_type = (nlh->nlmsg_type == RTM_NEWADDR) ? "add_addr" : "del_addr";
-    
-    std::stringstream ss;
-    ss << "iface=" << ifname 
-       << " addr=" << (tb[IFA_ADDRESS] ? ip_str : "none")
-       << " mac=none"
-       << " gateway=none"
-       << " mask=" << (mask_str[0] ? mask_str : "none")
-       << " flag=00000000";
-    
-    return command_processor_->getSerializer()->serializeResponse(event_type, ss.str());
-}
-
-std::string NetworkDaemon::formatRouteEvent(struct nlmsghdr* nlh, struct rtmsg* rtm,
-                                          struct nlattr* tb[], const char* ifname,
-                                          const char* dst_str, const char* gw_str) {
-    std::string event_type = (nlh->nlmsg_type == RTM_NEWROUTE) ? "add_route" : "del_route";
-    
-    std::string destination = (tb[RTA_DST] ? dst_str : "default");
-    
-    std::stringstream ss;
-    ss << "iface=" << (ifname[0] ? ifname : "none")
-       << " addr=" << destination
-       << " mac=none"
-       << " gateway=" << (tb[RTA_GATEWAY] ? gw_str : "none")
-       << " mask=none"
-       << " flag=00000000";
-    
-    return command_processor_->getSerializer()->serializeResponse(event_type, ss.str());
-}
-
 
 NetworkDaemon::~NetworkDaemon() {
 }
