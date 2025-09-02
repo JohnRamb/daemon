@@ -37,8 +37,7 @@ private:
     std::string handleOff(const std::string& ifname);
     std::string handleDhcpOn(const std::string& ifname);
     std::string handleDhcpOff(const std::string& ifname);
-    std::string handleSetStatic(const std::string& ifname, const std::string& ip, 
-                               const std::string& prefix, const std::string& gateway);
+    std::string handleSetStatic(const std::string& ifname);
 };
 
 #endif

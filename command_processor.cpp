@@ -55,10 +55,10 @@ void CommandProcessor::handleCommand(int client_fd, const std::string& command) 
     } else if (cmd == "dhcpOff" && tokens.size() == 2) {
         response = handleDhcpOff(tokens[1]);
         return;
-    } else if (cmd == "setIface" && tokens.size() == 5) {
-        response = handleSetStatic(tokens[1], tokens[2], tokens[3], tokens[4]);
+    } else if (cmd == "setIface") {
+        response = handleSetStatic(tokens[1]);
     } else {
-        response = "error(unknown command or invalid arguments)";
+        response = cmd + "| error(unknown command or invalid arguments)";
     }
 
     std::cout << response << std::endl;
@@ -241,7 +241,7 @@ std::string CommandProcessor::handleOn(const std::string& ifname) {
     
     // Consider moving this to a separate call or adding error handling
     
-    handleSetStatic(name, ip, prefix, gateway);
+    handleSetStatic(ifname);
     
     return "success(interface enabled)";
 }
@@ -294,12 +294,12 @@ std::string CommandProcessor::handleDhcpOff(const std::string& ifname) {
     return "success(DHCP disabled)";
 }
 
-std::string CommandProcessor::handleSetStatic(const std::string& ifname, const std::string& ip, 
-                                             const std::string& prefix, const std::string& gateway) {
-    if (ifname.empty() || ip.empty() || prefix.empty()) {
+std::string CommandProcessor::handleSetStatic(const std::string& ifname) {
+    if (ifname.empty()) {
         return "error(invalid arguments)";
     }
 
+    auto [name, ip, prefix, gateway] = extractNetworkParams(ifname);
     // Валидация IP-адреса
     struct in_addr addr;
     if (inet_pton(AF_INET, ip.c_str(), &addr) != 1) {
@@ -325,6 +325,9 @@ std::string CommandProcessor::handleSetStatic(const std::string& ifname, const s
     }
 
     std::string ip_mask = ip + "/" + prefix;
-    network_mgr_.setStaticIP(ifname, ip_mask, gateway.empty() ? "none" : gateway);
+
+    std::cout << "[SET_STATIC]: IFACE: " << ifname << " MASK: " << ip_mask << " GATEWAY: " << gateway << std::endl; 
+
+    network_mgr_.setStaticIP(name, ip_mask, gateway.empty() ? "none" : gateway);
     return "success(static address set)";
 }
