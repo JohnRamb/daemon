@@ -210,9 +210,8 @@ std::string NetworkDaemon::formatRouteEvent(struct nlmsghdr* nlh, struct rtmsg* 
     return command_processor_->getSerializer()->serializeResponse(event_type, ss.str());
 }
 
-// Остальные методы остаются без изменений
+
 NetworkDaemon::~NetworkDaemon() {
-    // Очистка ресурсов
 }
 
 std::string NetworkDaemon::getTimestamp() const {
