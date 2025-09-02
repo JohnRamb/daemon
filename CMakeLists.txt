@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.12)
 project(network_daemon)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -6,15 +6,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Включить более строгие предупреждения
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic")
+add_compile_options(-Wall -Wextra -Wpedantic)
 
 # Опция для включения/отключения демонизации
 option(ENABLE_DAEMON "Enable daemonization of the network daemon" OFF)
 
-# Если опция ENABLE_DAEMON включена, добавляем макрос
-if(ENABLE_DAEMON)
-    add_definitions(-DENABLE_DAEMON)
-endif()
+# Отладочный вывод
+message(STATUS "ENABLE_DAEMON option value: ${ENABLE_DAEMON}")
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBNL REQUIRED libnl-3.0 libnl-route-3.0)
@@ -39,6 +37,20 @@ endforeach()
 
 add_executable(network_daemon ${SOURCES})
 
+# Добавляем определения макросов для конкретного target
+if(ENABLE_DAEMON)
+    message(STATUS "Daemonization: ENABLED")
+    target_compile_definitions(network_daemon PRIVATE ENABLE_DAEMON)
+else()
+    message(STATUS "Daemonization: DISABLED")
+endif()
+
+# Можно добавить общие определения для всех файлов
+target_compile_definitions(network_daemon PRIVATE
+    VERSION="1.0.0"
+    BUILD_TIMESTAMP="${CMAKE_BUILD_TYPE}"
+)
+
 target_include_directories(network_daemon PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${LIBNL_INCLUDE_DIRS}
@@ -47,12 +59,6 @@ target_include_directories(network_daemon PRIVATE
 target_link_libraries(network_daemon PRIVATE
     ${LIBNL_LIBRARIES}
 )
-
-# Установка целевых каталогов для библиотек
-link_directories(${LIBNL_LIBRARY_DIRS})
-
-# Добавляем каталоги для поиска заголовков
-include_directories(${LIBNL_INCLUDE_DIRS})
 
 # Вывод информации о найденных библиотеках
 message(STATUS "libnl include directories: ${LIBNL_INCLUDE_DIRS}")

@@ -26,6 +26,10 @@ void EventLoop::add(int fd, uint32_t events, std::function<void(int, uint32_t)> 
 }
 
 void EventLoop::remove(int fd) {
+    if (handlers_.find(fd) == handlers_.end()) {
+        std::cerr << "Attempted to remove unregistered fd: " << fd << std::endl;
+        return;
+    }
     if (epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr) == -1) {
         std::cerr << "Не удалось удалить fd из epoll: " << strerror(errno) << std::endl;
     }
