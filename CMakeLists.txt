@@ -8,6 +8,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Включить более строгие предупреждения
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic")
 
+# Опция для включения/отключения демонизации
+option(ENABLE_DAEMON "Enable daemonization of the network daemon" OFF)
+
+# Если опция ENABLE_DAEMON включена, добавляем макрос
+if(ENABLE_DAEMON)
+    add_definitions(-DENABLE_DAEMON)
+endif()
+
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBNL REQUIRED libnl-3.0 libnl-route-3.0)
 
