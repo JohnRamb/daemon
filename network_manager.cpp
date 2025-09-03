@@ -13,195 +13,203 @@
 #include <sys/wait.h>
 #include <sstream>
 #include <iostream>
+#include <dhcpcd_client.h>
 
-NetworkManager::NetworkManager(NetlinkManager& netlink_mgr) : netlink_mgr_(netlink_mgr) {}
+NetworkManager::NetworkManager(NetlinkManager& netlink_mgr,
+                             std::unique_ptr<DHCPClient> dhcp_client,
+                             LogCallback log_callback)
+    : netlink_mgr_(netlink_mgr),
+      dhcp_client_(std::move(dhcp_client ? std::move(dhcp_client) : std::make_unique<DhcpcdClient>())),
+      log_callback_(log_callback) {}
 
-std::string NetworkManager::setDynamicIP(const std::string& ifname) {
-    std::cout << "DEBUG: setDynamicIP called for interface: " << ifname << std::endl;
+void NetworkManager::log(const std::string& message) const {
+    if (log_callback_) {
+        log_callback_(message);
+    } else {
+        std::cout << message << std::endl;
+    }
+}
 
+bool NetworkManager::validateInterface(const std::string& ifname) const {
+    struct nl_cache* link_cache = netlink_mgr_.getLinkCache();
+    return rtnl_link_get_by_name(link_cache, ifname.c_str()) != nullptr;
+}
+
+bool NetworkManager::setDynamicIP(const std::string& ifname) {
+    if (!validateInterface(ifname)) {
+        log("Error: Interface " + ifname + " not found");
+        return false;
+    }
+    
+    if (!stopDynamicIP(ifname)) {
+        log("Warning: Failed to stop existing DHCP client");
+    }
+    
+    log("Setting DHCP for interface: " + ifname);
+    return dhcp_client_->start(ifname);
+}
+
+bool NetworkManager::stopDynamicIP(const std::string& ifname) {
     if (ifname.empty()) {
-        std::cerr << "ERROR: No interface specified in setDynamicIP" << std::endl;
-        return "error(no interface specified)";
+        log("Warning: Empty interface name");
+        return false;
     }
-
-    //std::string name = "eno1"; // test
-    std::cout << "INFO: Setting DHCP for interface: " << ifname << std::endl;
-    //std::cout << "DEBUG: Using interface name: " << name << " for dhcpcd" << std::endl;
     
-    stopDhcpcd(ifname);
-
-    pid_t pid = fork();
-    if (pid == -1) {
-        std::cerr << "ERROR: fork() failed in setDynamicIP: " << strerror(errno) << std::endl;
-        return "error(fork failed)";
-    } else if (pid == 0) {
-        std::cout << "DEBUG: Child process executing: dhcpcd -n " << ifname << std::endl;
-        execlp("dhcpcd", "dhcpcd", "-n", ifname.c_str(), nullptr);
-        std::cerr << "ERROR: execlp failed: " << strerror(errno) << std::endl;
-        _exit(EXIT_FAILURE);
-    }
-
-    std::cout << "DEBUG: Waiting for dhcpcd process to complete, PID: " << pid << std::endl;
-    int status;
-    waitpid(pid, &status, 0);
-    
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-        std::cout << "INFO: dhcpcd completed successfully for interface: " << ifname << std::endl;
-        return getInterfaceInfo(ifname);
-    } else {
-        std::cerr << "ERROR: dhcpcd failed for interface: " << ifname 
-                  << ", exit status: " << WEXITSTATUS(status) << std::endl;
-        return "error(dhcpcd failed)";
-    }
+    log("Stopping DHCP for interface: " + ifname);
+    return dhcp_client_->stop(ifname);
 }
 
-void NetworkManager::stopDhcpcd(const std::string& ifname) {
-    std::cout << "DEBUG: stopDhcpcd called for interface: " << ifname << std::endl;
-    
-    if (!ifname.empty()) {
-        std::cout << "INFO: Stopping dhcpcd for interface: " << ifname << std::endl;
-        
-        pid_t pid = fork();
-        if (pid == 0) {
-            std::cout << "DEBUG: Child process executing: dhcpcd -k " << ifname << std::endl;
-            execlp("dhcpcd", "dhcpcd", "-k", ifname.c_str(), nullptr);
-            std::cerr << "ERROR: execlp failed in stopDhcpcd: " << strerror(errno) << std::endl;
-            _exit(EXIT_FAILURE);
-        }
-        
-        std::cout << "DEBUG: Waiting for dhcpcd stop process, PID: " << pid << std::endl;
-        waitpid(pid, nullptr, 0);
-        std::cout << "INFO: dhcpcd stopped for interface: " << ifname << std::endl;
-    } else {
-        std::cout << "WARNING: stopDhcpcd called with empty interface name" << std::endl;
+bool NetworkManager::setStaticIP(const std::string& ifname, const std::string& ip, 
+                               uint8_t prefix_len, const std::string& gateway) {
+    if (!validateInterface(ifname)) {
+        log("Error: Interface " + ifname + " not found");
+        return false;
     }
-}
-
-void NetworkManager::setStaticIP(const std::string& ifname, const std::string& ip_mask, const std::string& gateway) {
+    
     struct nl_sock* sock = netlink_mgr_.getSocket();
     struct nl_cache* link_cache = netlink_mgr_.getLinkCache();
-
+    
     struct rtnl_link* link = rtnl_link_get_by_name(link_cache, ifname.c_str());
-    if (!link) {
-        std::cerr << "Interface " << ifname << " not found" << std::endl;
-        return;
-    }
-
     int ifindex = rtnl_link_get_ifindex(link);
-    struct nl_addr* addr;
-    nl_addr_parse(ip_mask.c_str(), AF_INET, &addr);
+    
+    // Remove existing addresses
+    struct nl_cache* addr_cache = netlink_mgr_.getAddrCache();
+    struct nl_object* obj;
+    nl_cache_foreach(addr_cache, obj) {
+        struct rtnl_addr* addr = (struct rtnl_addr*)obj;
+        if (rtnl_addr_get_ifindex(addr) == ifindex) {
+            rtnl_addr_delete(sock, addr, 0);
+        }
+    }
+    
+    // Add new address
+    struct nl_addr* nl_addr;
+    std::string ip_with_prefix = ip + "/" + std::to_string(prefix_len);
+    int err = nl_addr_parse(ip_with_prefix.c_str(), AF_INET, &nl_addr);
+    
+    if (err < 0) {
+        log("Error: Failed to parse IP address: " + ip_with_prefix);
+        return false;
+    }
+    
     struct rtnl_addr* rt_addr = rtnl_addr_alloc();
     rtnl_addr_set_ifindex(rt_addr, ifindex);
-    rtnl_addr_set_local(rt_addr, addr);
+    rtnl_addr_set_local(rt_addr, nl_addr);
     rtnl_addr_set_family(rt_addr, AF_INET);
-
-    int err = rtnl_addr_add(sock, rt_addr, 0);
+    
+    err = rtnl_addr_add(sock, rt_addr, 0);
     if (err < 0) {
-        std::cerr << "Failed to set IP " << ip_mask << " on " << ifname << ": " << nl_geterror(err) << std::endl;
-    } else {
-        std::cout << "Статический IP установлен: " << ip_mask << " на интерфейсе " << ifname << std::endl;
+        log("Error: Failed to set static IP: " + std::string(nl_geterror(err)));
+        nl_addr_put(nl_addr);
+        rtnl_addr_put(rt_addr);
+        return false;
     }
-
-    nl_addr_put(addr);
+    
+    nl_addr_put(nl_addr);
     rtnl_addr_put(rt_addr);
-    rtnl_link_put(link);
-
-    if (!gateway.empty() && gateway != "none") {
-        struct nl_addr* gw_addr;
-        nl_addr_parse(gateway.c_str(), AF_INET, &gw_addr);
-        struct rtnl_route* route = rtnl_route_alloc();
-        struct nl_addr* dst_addr;
-        nl_addr_parse("0.0.0.0/0", AF_INET, &dst_addr);
-        rtnl_route_set_dst(route, dst_addr);
-        rtnl_route_set_scope(route, RT_SCOPE_UNIVERSE);
-        rtnl_route_set_protocol(route, RTPROT_STATIC);
-        rtnl_route_set_family(route, AF_INET);
-        rtnl_route_set_table(route, RT_TABLE_MAIN);
-
-        struct rtnl_nexthop* nh = rtnl_route_nh_alloc();
-        rtnl_route_nh_set_gateway(nh, gw_addr);
-        rtnl_route_nh_set_ifindex(nh, ifindex);
-        rtnl_route_add_nexthop(route, nh);
-
-        err = rtnl_route_add(sock, route, 0);
-        if (err < 0) {
-            std::cerr << "Failed to set gateway " << gateway << ": " << nl_geterror(err) << std::endl;
-        } else {
-            std::cout << "Шлюз установлен: " << gateway << " через интерфейс " << ifindex << std::endl;
+    
+    // Add gateway if specified
+    if (!gateway.empty()) {
+        if (!addRoute(gateway, ifindex)) {
+            log("Warning: Failed to set gateway");
         }
-
-        nl_addr_put(dst_addr);
-        nl_addr_put(gw_addr);
-        rtnl_route_put(route);
     }
+    
+    log("Static IP " + ip_with_prefix + " set on interface " + ifname);
+    return true;
 }
 
-std::string NetworkManager::getInterfaceInfo(const std::string& ifname) {
+bool NetworkManager::addRoute(const std::string& gateway, int ifindex) {
+    struct nl_sock* sock = netlink_mgr_.getSocket();
+    
+    struct nl_addr* gw_addr;
+    int err = nl_addr_parse(gateway.c_str(), AF_INET, &gw_addr);
+    if (err < 0) {
+        log("Error: Failed to parse gateway address: " + gateway);
+        return false;
+    }
+    
+    struct rtnl_route* route = rtnl_route_alloc();
+    struct nl_addr* dst_addr;
+    nl_addr_parse("0.0.0.0/0", AF_INET, &dst_addr);
+    
+    rtnl_route_set_dst(route, dst_addr);
+    rtnl_route_set_scope(route, RT_SCOPE_UNIVERSE);
+    rtnl_route_set_table(route, RT_TABLE_MAIN);
+    
+    struct rtnl_nexthop* nh = rtnl_route_nh_alloc();
+    rtnl_route_nh_set_gateway(nh, gw_addr);
+    rtnl_route_nh_set_ifindex(nh, ifindex);
+    rtnl_route_add_nexthop(route, nh);
+    
+    err = rtnl_route_add(sock, route, 0);
+    if (err < 0) {
+        log("Error: Failed to add route: " + std::string(nl_geterror(err)));
+        nl_addr_put(gw_addr);
+        nl_addr_put(dst_addr);
+        rtnl_route_put(route);
+        return false;
+    }
+    
+    nl_addr_put(gw_addr);
+    nl_addr_put(dst_addr);
+    rtnl_route_put(route);
+    return true;
+}
+
+std::optional<NetworkManager::InterfaceInfo> NetworkManager::getInterfaceInfo(const std::string& ifname) {
+    if (!validateInterface(ifname)) {
+        log("Error: Interface " + ifname + " not found");
+        return std::nullopt;
+    }
+    
     struct nl_cache* link_cache = netlink_mgr_.getLinkCache();
     struct nl_cache* addr_cache = netlink_mgr_.getAddrCache();
     struct nl_cache* route_cache = netlink_mgr_.getRouteCache();
-    if (!link_cache || !addr_cache || !route_cache) {
-        return "error(no cache available)";
-    }
-
+    
+    InterfaceInfo info;
+    info.name = ifname;
+    
+    // Get interface status
     struct rtnl_link* link = rtnl_link_get_by_name(link_cache, ifname.c_str());
-    if (!link) {
-        return "error(interface not found)";
-    }
-
-    int ifindex = rtnl_link_get_ifindex(link);
-    unsigned int flags = rtnl_link_get_flags(link);
-    std::string flag_str = (flags & IFF_UP) ? "UP" : "DOWN";
-
-    std::string ip_str = "none";
-    std::string mask_str = "none";
-    struct nl_object* obj = nl_cache_get_first(addr_cache);
-    while (obj) {
+    info.is_up = (rtnl_link_get_flags(link) & IFF_UP) != 0;
+    rtnl_link_put(link);
+    
+    // Get IP address
+    struct nl_object* obj;
+    nl_cache_foreach(addr_cache, obj) {
         struct rtnl_addr* addr = (struct rtnl_addr*)obj;
-        if (rtnl_addr_get_ifindex(addr) == ifindex && rtnl_addr_get_family(addr) == AF_INET) {
+        if (rtnl_addr_get_ifindex(addr) == rtnl_link_get_ifindex(link) && 
+            rtnl_addr_get_family(addr) == AF_INET) {
             struct nl_addr* local = rtnl_addr_get_local(addr);
-            if (local) {
-                char ip_buf[INET_ADDRSTRLEN] = {0};
-                nl_addr2str(local, ip_buf, sizeof(ip_buf));
-                ip_str = ip_buf;
-                size_t slash_pos = ip_str.find('/');
-                if (slash_pos != std::string::npos) {
-                    mask_str = ip_str.substr(slash_pos + 1);
-                    ip_str = ip_str.substr(0, slash_pos);
-                }
-                break;
-            }
+            char ip_buf[INET_ADDRSTRLEN];
+            nl_addr2str(local, ip_buf, sizeof(ip_buf));
+            info.ip = ip_buf;
+            break;
         }
-        obj = nl_cache_get_next(obj);
     }
-
-    std::string gateway_str = "none";
-    obj = nl_cache_get_first(route_cache);
-    while (obj) {
+    
+    // Get gateway
+    nl_cache_foreach(route_cache, obj) {
         struct rtnl_route* route = (struct rtnl_route*)obj;
         if (rtnl_route_get_family(route) == AF_INET) {
             struct nl_addr* dst = rtnl_route_get_dst(route);
-            if (dst && nl_addr_get_prefixlen(dst) == 0) { // Проверяем маршрут по умолчанию (0.0.0.0/0)
+            if (dst && nl_addr_get_prefixlen(dst) == 0) {
                 struct rtnl_nexthop* nh = rtnl_route_nexthop_n(route, 0);
-                if (nh && rtnl_route_nh_get_ifindex(nh) == ifindex) {
+                if (nh && rtnl_route_nh_get_ifindex(nh) == rtnl_link_get_ifindex(link)) {
                     struct nl_addr* gw = rtnl_route_nh_get_gateway(nh);
                     if (gw) {
-                        char gw_buf[INET_ADDRSTRLEN] = {0};
+                        char gw_buf[INET_ADDRSTRLEN];
                         inet_ntop(AF_INET, nl_addr_get_binary_addr(gw), gw_buf, sizeof(gw_buf));
-                        gateway_str = gw_buf;
+                        info.gateway = gw_buf;
                         break;
                     }
                 }
             }
         }
-        obj = nl_cache_get_next(obj);
     }
-
-    rtnl_link_put(link);
-
-    std::stringstream ss;
-    ss << ifname << ":" << ip_str << ":" << mask_str << ":" << flag_str << ":" << gateway_str;
-    return ss.str();
+    
+    return info;
 }
 
 bool NetworkManager::bringInterfaceUp(const std::string& ifname) {
@@ -210,33 +218,23 @@ bool NetworkManager::bringInterfaceUp(const std::string& ifname) {
     
     struct rtnl_link* link = rtnl_link_get_by_name(link_cache, ifname.c_str());
     if (!link) {
-        std::cerr << "Interface " << ifname << " not found" << std::endl;
+        log("Error: Interface " + ifname + " not found");
         return false;
     }
     
-    // Создаем новый объект link для изменения
     struct rtnl_link* new_link = rtnl_link_alloc();
-    if (!new_link) {
-        std::cerr << "Failed to allocate link object" << std::endl;
-        rtnl_link_put(link);
-        return false;
-    }
-    
-    // Устанавливаем флаг UP
     rtnl_link_set_flags(new_link, IFF_UP);
     
     int err = rtnl_link_change(sock, link, new_link, 0);
+    rtnl_link_put(link);
+    rtnl_link_put(new_link);
+    
     if (err < 0) {
-        std::cerr << "Failed to bring interface " << ifname << " up: " << nl_geterror(err) << std::endl;
-        rtnl_link_put(link);
-        rtnl_link_put(new_link);
+        log("Error: Failed to bring interface up: " + std::string(nl_geterror(err)));
         return false;
     }
     
-    std::cout << "Interface " << ifname << " brought up successfully" << std::endl;
-    
-    rtnl_link_put(link);
-    rtnl_link_put(new_link);
+    log("Interface " + ifname + " brought up successfully");
     return true;
 }
 
@@ -246,32 +244,26 @@ bool NetworkManager::bringInterfaceDown(const std::string& ifname) {
     
     struct rtnl_link* link = rtnl_link_get_by_name(link_cache, ifname.c_str());
     if (!link) {
-        std::cerr << "Interface " << ifname << " not found" << std::endl;
+        log("Error: Interface " + ifname + " not found");
         return false;
     }
     
-    // Создаем новый объект link для изменения
     struct rtnl_link* new_link = rtnl_link_alloc();
-    if (!new_link) {
-        std::cerr << "Failed to allocate link object" << std::endl;
-        rtnl_link_put(link);
-        return false;
-    }
-    
-    // Снимаем флаг UP
     rtnl_link_unset_flags(new_link, IFF_UP);
     
     int err = rtnl_link_change(sock, link, new_link, 0);
+    rtnl_link_put(link);
+    rtnl_link_put(new_link);
+    
     if (err < 0) {
-        std::cerr << "Failed to bring interface " << ifname << " down: " << nl_geterror(err) << std::endl;
-        rtnl_link_put(link);
-        rtnl_link_put(new_link);
+        log("Error: Failed to bring interface down: " + std::string(nl_geterror(err)));
         return false;
     }
     
-    std::cout << "Interface " << ifname << " brought down successfully" << std::endl;
-    
-    rtnl_link_put(link);
-    rtnl_link_put(new_link);
+    log("Interface " + ifname + " brought down successfully");
     return true;
+}
+
+void NetworkManager::setLogCallback(LogCallback callback) {
+    log_callback_ = callback;
 }
