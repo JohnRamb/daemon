@@ -11,33 +11,21 @@
 
 class CommandProcessor {
 public:
-    using ClientHandler = std::function<void(int, const std::string&)>;
-
-    CommandProcessor(UnixSocketServer& server, NetlinkManager& netlink_mgr, NetworkManager& network_mgr,
-                     std::unique_ptr<CommandSerializer> serializer);
-
-    void handleCommand(int client_fd, const std::string& command);
-
-    CommandSerializer* getSerializer() const {
-        return serializer_ .get();
-    }
+    CommandProcessor(NetworkManager& network_mgr, std::unique_ptr<CommandSerializer> serializer);
+    
+    std::string processCommand(const std::string& command);
+    std::string getTimestamp() const;
 
 private:
-    UnixSocketServer& server_;
-    NetlinkManager& netlink_mgr_;
     NetworkManager& network_mgr_;
     std::unique_ptr<CommandSerializer> serializer_;
-
-    std::tuple<std::string, std::string, std::string, std::string> extractNetworkParams(const std::string& s_expression) const;
-    std::string maskToPrefix(const std::string& mask) const;
-    std::string extractInterfaceName(const std::string& s_expression) const;
-    std::string getTimestamp() const;
+    
     std::string handleEnumerate();
-    std::string handleOn(const std::string& ifname);
-    std::string handleOff(const std::string& ifname);
-    std::string handleDhcpOn(const std::string& ifname);
-    std::string handleDhcpOff(const std::string& ifname);
-    std::string handleSetStatic(const std::string& ifname);
+    std::string handleOn(const std::vector<std::string>& tokens);
+    std::string handleOff(const std::vector<std::string>& tokens);
+    std::string handleDhcpOn(const std::vector<std::string>& tokens);
+    std::string handleDhcpOff(const std::vector<std::string>& tokens);
+    std::string handleSetStatic(const std::vector<std::string>& tokens);
 };
 
 #endif

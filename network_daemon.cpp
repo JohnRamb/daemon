@@ -76,8 +76,7 @@ NetworkDaemon::NetworkDaemon()
     : netlink_mgr_(),
       unix_server_(loop_, SOCKET_PATH),
       network_mgr_(netlink_mgr_),
-      command_processor_(std::make_unique<CommandProcessor>(
-          unix_server_, netlink_mgr_, network_mgr_, std::make_unique<SExpressionParser>())) {
+      command_processor_(std::make_unique<CommandProcessor>(network_mgr_, std::make_unique<SExpressionParser>())) {
     std::cout << "[" << getTimestamp() << "] NetworkDaemon: Starting initialization" << std::endl;
     
     setupSignalHandlers();
@@ -91,6 +90,10 @@ NetworkDaemon::NetworkDaemon()
         netlink_mgr_.setAddrCallback([this](nl_msg* msg) { handleAddrEvent(msg); });
         netlink_mgr_.setLinkCallback([this](nl_msg* msg) { handleLinkEvent(msg); });
         netlink_mgr_.setRouteCallback([this](nl_msg* msg) { handleRouteEvent(msg); });
+
+        unix_server_.setClientHandler([this](int client_fd, const std::string& command) {
+            handleClientCommand(client_fd, command);
+        });
         
         std::cout << "[" << getTimestamp() << "] NetworkDaemon: Netlink callbacks configured" << std::endl;
         
@@ -115,6 +118,17 @@ NetworkDaemon::NetworkDaemon()
     }
 
     std::cout << "[" << getTimestamp() << "] NetworkDaemon: Initialization completed successfully" << std::endl;
+}
+
+void NetworkDaemon::handleClientCommand(int client_fd, const std::string& command) {
+    try {
+        std::string response = command_processor_->processCommand(command);
+        unix_server_.sendResponse(client_fd, response);
+    } catch (const std::exception& e) {
+        std::string error_response = command_processor_->getSerializer()->serializeResponse(
+            "error", std::string("internal error: ") + e.what());
+        unix_server_.sendResponse(client_fd, error_response);
+    }
 }
 
 void NetworkDaemon::handleLinkEvent(nl_msg* msg) {

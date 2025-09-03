@@ -22,7 +22,7 @@ public:
 
     void init();
     int getSocketFd() const;
-    struct nl_sock* getSocket() const; // Добавлен новый метод
+    struct nl_sock* getSocket() const;
     void processEvents();
 
     void setLinkCallback(LinkCallback callback);

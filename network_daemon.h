@@ -31,8 +31,8 @@ private:
     void handleLinkEvent(struct nl_msg* msg);
     void handleAddrEvent(struct nl_msg* msg);
     void handleRouteEvent(struct nl_msg* msg);
+    void handleClientCommand(int client_fd, const std::string& command);
     
-    // Вспомогательные методы для форматирования событий
     std::string formatLinkEvent(struct nlmsghdr* nlh, struct ifinfomsg* ifi, 
                                struct nlattr* tb[], const char* ifname, const char* mac_str);
     std::string formatAddrEvent(struct nlmsghdr* nlh, struct ifaddrmsg* ifa,
