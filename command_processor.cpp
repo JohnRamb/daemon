@@ -290,7 +290,9 @@ std::string CommandProcessor::handleDhcpOff(const std::string& ifname) {
     if (ifname.empty()) {
         return "error(no interface specified)";
     }
-    network_mgr_.stopDhcpcd(ifname);
+
+    auto [name, ip, prefix, gateway] = extractNetworkParams(ifname);
+    network_mgr_.stopDhcpcd(name);
     return "success(DHCP disabled)";
 }
 
